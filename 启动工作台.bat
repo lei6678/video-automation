@@ -1,0 +1,16 @@
+@echo off
+chcp 65001 >nul 2>&1
+title Video Automation Server
+
+cd /d "E:\video-automation\backend"
+
+echo ============================================
+echo   Video Automation Server
+echo   (Keep this window open, minimize it)
+echo ============================================
+echo.
+echo Starting server...
+echo.
+
+python main.py
+pause

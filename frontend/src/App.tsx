@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 
+// API 基地址：开发时走 VITE_API_BASE_URL，生产构建为空 → 同源相对路径（局域网部署）
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+
+
 // ============== 接口定义 ==============
 
 interface ExtractResult {
@@ -29,6 +33,7 @@ interface TaskDetail {
   book_author: string | null
   video_title: string | null
   content_mode: string | null
+  visual_context: string | null
   error_msg: string | null
   created_at: string
 }
@@ -111,8 +116,13 @@ function App() {
   const [cardSubtitleLine, setCardSubtitleLine] = useState('图片由AI生成与网络下载\n科普视频 无不良引导')
 
   // Step01 双模输入
+  const [inputMode, setInputMode] = useState<'standard' | 'import'>('standard')  // 标准模式 | 直接导入
   const [manualText, setManualText] = useState('')
   const [manualTitle, setManualTitle] = useState('')
+  // 导入模式专用状态
+  const [importRewrittenText, setImportRewrittenText] = useState('')
+  const [importVideoTitle, setImportVideoTitle] = useState('')
+  const [importContentMode, setImportContentMode] = useState<'book' | 'general'>('book')
   const [selectedVoice, setSelectedVoice] = useState("vc_shuangsisi")
   const [selectedRate, setSelectedRate] = useState("+10%")
   const [segments, setSegments] = useState<SegmentInfo[]>([])
@@ -144,8 +154,11 @@ function App() {
   const [draftDownloadUrl, setDraftDownloadUrl] = useState('')
   const [srtDownloadUrl, setSrtDownloadUrl] = useState('')
   const [assDownloadUrl, setAssDownloadUrl] = useState('')
+  const [jianyingPublished, setJianyingPublished] = useState(false)
+  const [jianyingDraftName, setJianyingDraftName] = useState('')
   const [selectedVideoStyle, setSelectedVideoStyle] = useState('card_16x9')
   const [videoUrlCard, setVideoUrlCard] = useState('')
+  const [archivePath, setArchivePath] = useState('')  // v9: 成品库归档路径
 
 
   // 全局状态
@@ -157,7 +170,7 @@ function App() {
   const [videoMeta, setVideoMeta] = useState<ExtractResult | null>(null)
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/health')
+    fetch(`${API_BASE}/api/health`)
       .then((res) => res.json())
       .then((data) => setBackendStatus(data.status))
       .catch(() => setBackendStatus('offline'))
@@ -176,7 +189,7 @@ function App() {
     // Step A: 创建任务（跳过爬虫/ASR）
     let taskId = null
     try {
-      const resp = await fetch('http://localhost:8000/api/tasks/from-text', {
+      const resp = await fetch(`${API_BASE}/api/tasks/from-text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ raw_text: manualText, title: manualTitle || '手动录入' }),
@@ -196,7 +209,7 @@ function App() {
     setIsLoading(false)   // clean-text 接口会自己重置
     setIsLoading(true)
     try {
-      const cleanResp = await fetch('http://localhost:8000/api/clean-text', {
+      const cleanResp = await fetch(`${API_BASE}/api/clean-text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId, raw_text: manualText }),
@@ -207,17 +220,55 @@ function App() {
       console.error('清洗失败:', e)
     }
 
-    // Step C: 自动触发改写（light_dedupe 模式，保持原味）
+    // Step C: 自动触发深度改写
     try {
-      const rewriteResp = await fetch('http://localhost:8000/api/rewrite', {
+      const rewriteResp = await fetch(`${API_BASE}/api/rewrite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId, mode: 'rewrite' }),
       })
       const rewriteData = await rewriteResp.json()
       setRewrittenText(rewriteData.rewritten)
+      // v5: 自动改写也需要捕获爆款标题，填入画面顶部文案
+      if (rewriteData.video_title) {
+        setVideoTitle(rewriteData.video_title)
+      }
     } catch (e) {
       console.error('改写失败:', e)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleImportRewritten = async () => {
+    if (!importRewrittenText.trim()) return
+    setIsLoading(true)
+    setRewrittenText('')
+    setSegments([])
+    setFinalAudioUrl('')
+    setVideoMeta(null)
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/tasks/import-rewritten`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rewritten_text: importRewrittenText,
+          video_title: importVideoTitle,
+          raw_text: manualText,
+          content_mode: importContentMode,
+        }),
+      })
+      const data = await resp.json()
+      if (!data.task_id) throw new Error('导入失败')
+      setTaskId(data.task_id)
+      setOriginalText(manualText || importRewrittenText)
+      setCleanedText(importRewrittenText)
+      setRewrittenText(data.rewritten)
+      setVideoTitle(data.video_title)
+      setContentMode(importContentMode)
+    } catch (e) {
+      console.error('导入改写失败:', e)
     } finally {
       setIsLoading(false)
     }
@@ -227,7 +278,7 @@ function App() {
     if (!originalText.trim() || !taskId) return
     setIsLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/api/clean-text', {
+      const response = await fetch(`${API_BASE}/api/clean-text`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId, raw_text: originalText }),
@@ -241,14 +292,14 @@ function App() {
     }
   }
 
-  const handleRewrite = async (mode: 'rewrite' | 'light_dedupe') => {
+  const handleRewrite = async () => {
     if (!cleanedText.trim() || !taskId) return
     setIsRewriteLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/api/rewrite', {
+      const response = await fetch(`${API_BASE}/api/rewrite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: taskId, mode }),
+        body: JSON.stringify({ task_id: taskId, mode: 'rewrite' }),
       })
       const data: RewriteResult = await response.json()
       setRewrittenText(data.rewritten)
@@ -267,7 +318,7 @@ function App() {
     if (!taskId) return
     setIsBookInfoLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/api/book-info', {
+      const response = await fetch(`${API_BASE}/api/book-info`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId }),
@@ -294,7 +345,7 @@ function App() {
 
     // v5: 统一走标准模式，clone 音色由后端路由
     try {
-      const response = await fetch('http://localhost:8000/api/generate-audio', {
+      const response = await fetch(`${API_BASE}/api/generate-audio`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -307,11 +358,11 @@ function App() {
       if (data.segments) {
         setSegments(data.segments.map((s: SegmentInfo) => ({
           ...s,
-          audio_url: s.audio_url ? `http://localhost:8000${s.audio_url}` : s.audio_url,
+          audio_url: s.audio_url ? `${API_BASE}${s.audio_url}` : s.audio_url,
         })))
       }
       if (data.audio_url) {
-        setFinalAudioUrl(`http://localhost:8000${data.audio_url}`)
+        setFinalAudioUrl(`${API_BASE}${data.audio_url}`)
       }
       if (data.message) {
         console.log(`[TTS] ${data.message}`)
@@ -327,7 +378,7 @@ function App() {
     if (!taskId) return
     setRegeneratingIndex(index)
     try {
-      const response = await fetch('http://localhost:8000/api/tts/regenerate-segment', {
+      const response = await fetch(`${API_BASE}/api/tts/regenerate-segment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -343,11 +394,11 @@ function App() {
       if (data.segments) {
         setSegments(data.segments.map((s: SegmentInfo) => ({
           ...s,
-          audio_url: s.audio_url ? `http://localhost:8000${s.audio_url}` : s.audio_url,
+          audio_url: s.audio_url ? `${API_BASE}${s.audio_url}` : s.audio_url,
         })))
       }
       if (data.final_audio_url) {
-        setFinalAudioUrl(`http://localhost:8000${data.final_audio_url}`)
+        setFinalAudioUrl(`${API_BASE}${data.final_audio_url}`)
       }
     } catch (error) {
       console.error('片段重跑失败:', error)
@@ -361,13 +412,13 @@ function App() {
     if (!taskId) return
     setIsMerging(true)
     try {
-      await fetch('http://localhost:8000/api/tts/merge', {
+      await fetch(`${API_BASE}/api/tts/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId }),
       })
       // 直接更新 final audio URL（加时间戳防缓存）
-      setFinalAudioUrl(`http://localhost:8000/audio/${taskId}/final_tts.mp3?t=${Date.now()}`)
+      setFinalAudioUrl(`${API_BASE}/audio/${taskId}/final_tts.mp3?t=${Date.now()}`)
     } catch (error) {
       console.error('拼装失败:', error)
     } finally {
@@ -401,7 +452,7 @@ function App() {
     if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
 
     // ★ v4 轮询模式：POST 发完就走，不等待，用定时器每秒拉取最新图片
-    fetch('http://localhost:8000/api/images/generate', {
+    fetch(`${API_BASE}/api/images/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task_id: taskId, style: selectedImageStyle, aspect_ratio: selectedAspectRatio }),
@@ -416,7 +467,7 @@ function App() {
     // 立即开始轮询，每 2 秒刷新一次图片列表
     pollTimerRef.current = setInterval(async () => {
       try {
-        const resp = await fetch(`http://localhost:8000/api/images/${taskId}?_=${Date.now()}`)
+        const resp = await fetch(`${API_BASE}/api/images/${taskId}?_=${Date.now()}`)
         if (!resp.ok) return
         const data = await resp.json()
         setImages(data.images || [])
@@ -442,7 +493,7 @@ function App() {
   const refreshImages = async () => {
     if (!taskId) return
     try {
-      const resp = await fetch(`http://localhost:8000/api/images/${taskId}?_=${Date.now()}`)
+      const resp = await fetch(`${API_BASE}/api/images/${taskId}?_=${Date.now()}`)
       if (resp.ok) {
         const data = await resp.json()
         setImages(data.images || [])
@@ -458,7 +509,7 @@ function App() {
     setIsRegeneratingImage(segmentIndex)
     setImageMessage('')
     try {
-      const resp = await fetch('http://localhost:8000/api/images/regenerate-segment', {
+      const resp = await fetch(`${API_BASE}/api/images/regenerate-segment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_id: taskId, segment_index: segmentIndex, style: selectedImageStyle, aspect_ratio: selectedAspectRatio }),
@@ -481,23 +532,23 @@ function App() {
   const checkVideoStatus = async () => {
     if (!taskId) return
     try {
-      const resp = await fetch(`http://localhost:8000/api/video/status/${taskId}`)
+      const resp = await fetch(`${API_BASE}/api/video/status/${taskId}`)
       if (resp.ok) {
         const data = await resp.json()
         if (data.exists) {
           const cacheBust = Date.now()
-          setVideoUrl(`http://localhost:8000${data.video_url}?t=${cacheBust}`)
+          setVideoUrl(`${API_BASE}${data.video_url}?t=${cacheBust}`)
           setVideoDuration(data.duration_sec)
           setVideoSizeMb(data.size_mb)
           // v4: 同步下载链接
           if (data.jianying_draft_url) {
-            setDraftDownloadUrl(`http://localhost:8000${data.jianying_draft_url}`)
+            setDraftDownloadUrl(`${API_BASE}${data.jianying_draft_url}`)
           }
           if (data.srt_url) {
-            setSrtDownloadUrl(`http://localhost:8000${data.srt_url}`)
+            setSrtDownloadUrl(`${API_BASE}${data.srt_url}`)
           }
           if (data.ass_url) {
-            setAssDownloadUrl(`http://localhost:8000${data.ass_url}`)
+            setAssDownloadUrl(`${API_BASE}${data.ass_url}`)
           }
         }
       }
@@ -511,9 +562,11 @@ function App() {
     setIsVideoLoading(true)
     setVideoMessage('')
     try {
-      // v7: 纯三段式，card 始终触发
-      const modes: string[] = ['card']
-      const resp = await fetch('http://localhost:8000/api/video/compose', {
+      // v7: 根据风格动态选择合成模式（v8: card_bench → bench 对标卡片）
+      const isBench = selectedVideoStyle === 'card_bench'
+      const isCard = !isBench && selectedVideoStyle.startsWith('card_')
+      const modes: string[] = isBench ? ['bench'] : isCard ? ['card'] : ['cinematic']
+      const resp = await fetch(`${API_BASE}/api/video/compose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -533,23 +586,30 @@ function App() {
       // v5: 缓存爆破时间戳 — 强制浏览器加载最新画面
       const cacheBust = Date.now()
       if (data.video_url) {
-        setVideoUrl(`http://localhost:8000${data.video_url}?t=${cacheBust}`)
+        setVideoUrl(`${API_BASE}${data.video_url}?t=${cacheBust}`)
         setVideoDuration(data.duration_sec)
         setVideoSizeMb(data.size_mb)
       }
+      // v9: 成品库归档路径
+      setArchivePath(data.archive_path || '')
       // v7: card 卡片成品
       if (data.video_url_card) {
-        setVideoUrlCard(`http://localhost:8000${data.video_url_card}?t=${cacheBust}`)
+        setVideoUrlCard(`${API_BASE}${data.video_url_card}?t=${cacheBust}`)
       }
       // v4: 捕获下载链接
       if (data.jianying_draft_url) {
-        setDraftDownloadUrl(`http://localhost:8000${data.jianying_draft_url}`)
+        setDraftDownloadUrl(`${API_BASE}${data.jianying_draft_url}`)
       }
       if (data.srt_url) {
-        setSrtDownloadUrl(`http://localhost:8000${data.srt_url}`)
+        setSrtDownloadUrl(`${API_BASE}${data.srt_url}`)
       }
       if (data.ass_url) {
-        setAssDownloadUrl(`http://localhost:8000${data.ass_url}`)
+        setAssDownloadUrl(`${API_BASE}${data.ass_url}`)
+      }
+      // 剪映自动发布状态
+      if (data.jianying_published) {
+        setJianyingPublished(true)
+        setJianyingDraftName(data.jianying_draft_name || '')
       }
       setVideoMessage(data.message || '')
     } catch (e) {
@@ -567,7 +627,7 @@ function App() {
     console.log(`[restore] taskId=${taskId}, loading state from backend...`)
 
     // 1. 拉任务详情（文案/改写稿/标题/赛道）
-    fetch(`http://localhost:8000/api/tasks/${taskId}`)
+    fetch(`${API_BASE}/api/tasks/${taskId}`)
       .then(r => r.json())
       .then((t: TaskDetail) => {
         if (t.raw_transcript) setOriginalText(t.raw_transcript)
@@ -580,23 +640,23 @@ function App() {
       .catch(e => console.error('[restore] task fetch failed:', e))
 
     // 2. 拉清洗稿
-    fetch(`http://localhost:8000/audio/${taskId}/cleaned.txt?_=${Date.now()}`)
+    fetch(`${API_BASE}/audio/${taskId}/cleaned.txt?_=${Date.now()}`)
       .then(r => { if (r.ok) return r.text(); throw new Error('not found') })
       .then(t => setCleanedText(t))
       .catch(() => {})
 
     // 3. 拉配音片段
-    fetch(`http://localhost:8000/api/tts/segments/${taskId}`)
+    fetch(`${API_BASE}/api/tts/segments/${taskId}`)
       .then(r => r.json())
       .then(d => {
         if (d.segments?.length > 0) {
           setSegments(d.segments.map((s: SegmentInfo) => ({
             ...s,
-            audio_url: s.audio_url ? `http://localhost:8000${s.audio_url}` : s.audio_url,
+            audio_url: s.audio_url ? `${API_BASE}${s.audio_url}` : s.audio_url,
           })))
         }
         if (d.final_audio_url) {
-          setFinalAudioUrl(`http://localhost:8000${d.final_audio_url}?t=${Date.now()}`)
+          setFinalAudioUrl(`${API_BASE}${d.final_audio_url}?t=${Date.now()}`)
         }
       })
       .catch(() => {})
@@ -672,39 +732,108 @@ function App() {
         <section className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold text-gray-700">📥 文案输入</h2>
-            <span className="text-xs text-gray-400">粘贴轻抖等工具提取的原始文案</span>
-          </div>
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <input
-                type="text"
-                value={manualTitle}
-                onChange={(e) => setManualTitle(e.target.value)}
-                placeholder="视频标题（选填）"
-                className="flex-1 px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <textarea
-              value={manualText}
-              onChange={(e) => setManualText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey) handleManualSubmit() }}
-              placeholder="请在此粘贴原始文案内容..."
-              rows={10}
-              className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none leading-relaxed"
-              style={{ fontSize: '14px', lineHeight: '1.8' }}
-            />
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-400">Ctrl+Enter 快捷提交 · {manualText.length} 字</span>
+            {/* 模式切换 */}
+            <div className="flex bg-gray-100 rounded-lg p-0.5">
               <button
-                onClick={handleManualSubmit}
-                disabled={!manualText.trim() || isLoading}
-                className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed transition-colors shadow-sm"
+                onClick={() => setInputMode('standard')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${inputMode === 'standard' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
               >
-                {isLoading ? <span>⏳</span> : <span>📥</span>}
-                <span>{isLoading ? '处理中...' : '确认文案，进入AI改写'}</span>
+                标准模式
+              </button>
+              <button
+                onClick={() => setInputMode('import')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${inputMode === 'import' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                直接导入
               </button>
             </div>
           </div>
+
+          {/* ===== 标准模式：粘贴原文 → AI 改写 ===== */}
+          {inputMode === 'standard' && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={manualTitle}
+                  onChange={(e) => setManualTitle(e.target.value)}
+                  placeholder="视频标题（选填）"
+                  className="flex-1 px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <textarea
+                value={manualText}
+                onChange={(e) => setManualText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey) handleManualSubmit() }}
+                placeholder="请在此粘贴原始文案内容..."
+                rows={10}
+                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none leading-relaxed"
+                style={{ fontSize: '14px', lineHeight: '1.8' }}
+              />
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">Ctrl+Enter 快捷提交 · {manualText.length} 字</span>
+                <button
+                  onClick={handleManualSubmit}
+                  disabled={!manualText.trim() || isLoading}
+                  className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed transition-colors shadow-sm"
+                >
+                  {isLoading ? <span>⏳</span> : <span>📥</span>}
+                  <span>{isLoading ? '处理中...' : '确认文案，进入 AI 改写'}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ===== 导入模式：直接粘贴改好的文案 ===== */}
+          {inputMode === 'import' && (
+            <div className="space-y-3">
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-700">
+                💡 将网页版 DeepSeek 改好的文案直接粘贴到下方，导入后即可跳过 AI 改写，直接进入配音/生图/合成。
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-gray-500 mb-1 block">爆款标题</label>
+                  <input
+                    type="text"
+                    value={importVideoTitle}
+                    onChange={(e) => setImportVideoTitle(e.target.value)}
+                    placeholder="填写爆款标题..."
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-500 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-gray-500 mb-1 block">内容赛道</label>
+                  <select
+                    value={importContentMode}
+                    onChange={(e) => setImportContentMode(e.target.value as 'book' | 'general')}
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 focus:outline-none focus:ring-2 focus:ring-amber-500 text-sm"
+                  >
+                    <option value="book">📚 图书赛道</option>
+                    <option value="general">🛒 百货与流量赛道</option>
+                  </select>
+                </div>
+              </div>
+              <textarea
+                value={importRewrittenText}
+                onChange={(e) => setImportRewrittenText(e.target.value)}
+                placeholder="粘贴改写好的完整文案正文..."
+                rows={12}
+                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none leading-relaxed"
+                style={{ fontSize: '14px', lineHeight: '1.8' }}
+              />
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">已改好的文案 · {importRewrittenText.length} 字</span>
+                <button
+                  onClick={handleImportRewritten}
+                  disabled={!importRewrittenText.trim() || isLoading}
+                  className="flex items-center gap-2 px-6 py-3 bg-amber-600 text-white font-medium rounded-xl hover:bg-amber-700 disabled:bg-amber-300 disabled:cursor-not-allowed transition-colors shadow-sm"
+                >
+                  {isLoading ? <span>⏳</span> : <span>📥</span>}
+                  <span>{isLoading ? '导入中...' : '一键导入，进入后续工序'}</span>
+                </button>
+              </div>
+            </div>
+          )}
         </section>
         {/* ===== 视频数据看板 ===== */}
         {videoMeta && (
@@ -819,23 +948,14 @@ function App() {
             </div>
             <div className="flex flex-col justify-center items-center gap-4">
               <button
-                onClick={() => handleRewrite('rewrite')}
+                onClick={() => handleRewrite()}
                 disabled={!cleanedText.trim() || !taskId || isRewriteLoading}
                 className="flex items-center gap-2 w-full px-4 py-3 bg-purple-600 text-white font-medium rounded-xl hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed transition-colors shadow-sm"
               >
                 {isRewriteLoading ? <span>⏳</span> : <span>✍️</span>}
                 <span>{isRewriteLoading ? '改写中...' : '深度改写'}</span>
               </button>
-              <p className="text-xs text-gray-500 text-center">适合混剪，保留核心观点，口语化重写</p>
-              <button
-                onClick={() => handleRewrite('light_dedupe')}
-                disabled={!cleanedText.trim() || !taskId || isRewriteLoading}
-                className="flex items-center gap-2 w-full px-4 py-3 bg-teal-600 text-white font-medium rounded-xl hover:bg-teal-700 disabled:bg-teal-300 disabled:cursor-not-allowed transition-colors shadow-sm"
-              >
-                {isRewriteLoading ? <span>⏳</span> : <span>🔄</span>}
-                <span>{isRewriteLoading ? '处理中...' : '轻量去重'}</span>
-              </button>
-              <p className="text-xs text-gray-500 text-center">适合矩阵二创，极轻量化微调，保留原文力度</p>
+              <p className="text-xs text-gray-500 text-center">AI 深度洗稿：口语化重写、去 AI 味、破除连续七字查重</p>
             </div>
             <div className="space-y-3">
               <h3 className="text-sm font-semibold text-gray-600">候选稿（改写结果）</h3>
@@ -1000,7 +1120,7 @@ function App() {
                     </div>
                     {isSuccess && previewingIndex === seg.index && (
                       <div className="px-4 py-3 bg-blue-50 border-t border-blue-100">
-                        <audio controls src={seg.audio_url.startsWith('http') ? seg.audio_url : `http://localhost:8000${seg.audio_url}`} className="w-full" />
+                        <audio controls src={seg.audio_url.startsWith('http') ? seg.audio_url : `${API_BASE}${seg.audio_url}`} className="w-full" />
                       </div>
                     )}
                     {isFailed && seg.error_msg && (
@@ -1233,6 +1353,17 @@ function App() {
                   >
                     9:16 满屏竖图
                   </button>
+                  <button
+                    onClick={() => setSelectedAspectRatio('8:9')}
+                    disabled={isImageLoading}
+                    className={`px-3 py-2 text-sm font-medium transition-colors border-l border-gray-200 ${
+                      selectedAspectRatio === '8:9'
+                        ? 'bg-blue-600 text-white'
+                        : 'text-gray-600 hover:bg-gray-100'
+                    } disabled:opacity-50`}
+                  >
+                    8:9 对标卡片
+                  </button>
                 </div>
               </div>
             </div>
@@ -1339,7 +1470,7 @@ function App() {
                         {/* 图片 */}
                         {isSuccess && img.image_url ? (
                           <img
-                            src={`http://localhost:8000${img.image_url}`}
+                            src={`${API_BASE}${img.image_url}`}
                             alt={`分镜 ${sentIdx + 1}`}
                             className="w-full h-full object-cover"
                             loading="lazy"
@@ -1449,7 +1580,7 @@ function App() {
                     <div className="flex items-center justify-center p-4" style={{ minHeight: '400px', maxHeight: '70vh' }}>
                       {selectedImg.status === 'success' && selectedImg.image_url ? (
                         <img
-                          src={`http://localhost:8000${selectedImg.image_url}`}
+                          src={`${API_BASE}${selectedImg.image_url}`}
                           alt={`分镜 ${segIdx + 1} 配图`}
                           className="max-h-full object-contain rounded-lg shadow-2xl"
                           style={{ maxHeight: '65vh' }}
@@ -1499,8 +1630,10 @@ function App() {
                 disabled={isVideoLoading}
                 className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
               >
+                <option value="cinematic">满屏电影感 (全幅 Ken Burns)</option>
                 <option value="card_16x9">经典图书三段式 (16:9 视窗版)</option>
                 <option value="card_3x4">黄金遮罩三段式 (3:4 视窗版)</option>
+                <option value="card_bench">对标卡片 (深藏青 + 8:9 满宽大图)</option>
               </select>
             </div>
             <button
@@ -1579,43 +1712,61 @@ function App() {
                   src={videoUrl}
                   className="w-full"
                   style={{ maxHeight: '70vh', objectFit: 'contain' }}
-                  poster={`http://localhost:8000/images/${taskId}/seg_000.png`}
+                  poster={`${API_BASE}/images/${taskId}/seg_000.png`}
                 />
               </div>
-              {/* v4: 下载按钮行 —— SRT / ASS / 剪映草稿 */}
-              {(draftDownloadUrl || srtDownloadUrl || assDownloadUrl) && (
-                <div className="flex items-center gap-3 flex-wrap">
-                  {srtDownloadUrl && (
-                    <a
-                      href={srtDownloadUrl}
-                      download
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
-                    >
-                      <span className="text-base">📝</span> SRT 字幕下载
-                    </a>
-                  )}
-                  {assDownloadUrl && (
-                    <a
-                      href={assDownloadUrl}
-                      download
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 transition-colors"
-                    >
-                      <span className="text-base">🎨</span> ASS 高级字幕下载
-                    </a>
-                  )}
-                  {draftDownloadUrl && (
-                    <a
-                      href={draftDownloadUrl}
-                      download
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-green-50 text-green-700 border border-green-200 rounded-lg hover:bg-green-100 transition-colors font-medium"
-                    >
-                      <span className="text-base">✂️</span> 剪映草稿一键下载
-                    </a>
-                  )}
-                </div>
-              )}
+              {/* v4: 下载按钮行 —— SRT / ASS + 剪映自动发布状态 */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <a
+                  href={videoUrl}
+                  download={`成片_${videoTitle || taskId || ''}.mp4`}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-red-50 text-red-700 border border-red-200 rounded-lg hover:bg-red-100 transition-colors font-medium"
+                >
+                  <span className="text-base">⬇️</span> 下载成片
+                </a>
+                <button
+                  onClick={() => fetch(`${API_BASE}/api/open-output-dir`, { method: 'POST' })}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-gray-50 text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
+                  title="在服务器主机上打开成品库文件夹（远程同事请用下载按钮）"
+                >
+                  <span className="text-base">📂</span> 打开成品库
+                </button>
+                {srtDownloadUrl && (
+                  <a
+                    href={srtDownloadUrl}
+                    download
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
+                  >
+                    <span className="text-base">📝</span> SRT 字幕下载
+                  </a>
+                )}
+                {assDownloadUrl && (
+                  <a
+                    href={assDownloadUrl}
+                    download
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 transition-colors"
+                  >
+                    <span className="text-base">🎨</span> ASS 高级字幕下载
+                  </a>
+                )}
+                {jianyingPublished && (
+                  <span className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-green-50 text-green-700 border border-green-200 rounded-lg font-medium">
+                    <span className="text-base">✅</span> 已自动发送到剪映草稿箱{jianyingDraftName ? ` · ${jianyingDraftName}` : ''}
+                  </span>
+                )}
+                {!jianyingPublished && draftDownloadUrl && (
+                  <a
+                    href={draftDownloadUrl}
+                    download
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors font-medium"
+                  >
+                    <span className="text-base">⚠️</span> 剪映草稿（未自动发布，点此下载）
+                  </a>
+                )}
+              </div>
               <div className="flex items-center gap-2 text-xs text-gray-400">
                 <span>💡 提示：视频编码为 H.264，可直接上传抖音/视频号/小红书</span>
+                {archivePath && <span>· 已归档: {archivePath}</span>}
               </div>
             </div>
           )}

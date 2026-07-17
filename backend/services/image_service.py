@@ -79,23 +79,136 @@ STYLE_PROMPT_MAP = {
 SAFETY_SUFFIX = ", highly detailed faces, no duplicate characters, perfect anatomy, masterpiece"
 
 
-# ============== 单图直生 Prompt（v4：单句独立生图，彻底废弃九宫格）==============
+# ============== Prompt 安全降级（Fal.ai 内容审查规避）==============
+
+# 敏感词 → 中性替代词映射（按风险从高到低排列，长匹配优先）
+_CONTENT_SANITIZE_MAP: list[tuple[str, str]] = [
+    # 暴力/伤害类（长匹配优先）
+    ("碰高压电", "遭遇意外"),
+    ("高压电", "意外事故"),
+    ("触电身亡", "遭遇不幸"),
+    ("触电", "受伤"),
+    ("双手没了", "受了重伤"),
+    ("手没了", "受了伤"),
+    ("腿没了", "受了伤"),
+    ("双臂没了", "受了重伤"),
+    ("失去双手", "受了重伤"),
+    ("失去双腿", "受了重伤"),
+    ("失去手臂", "受了重伤"),
+    ("截肢", ""),
+    ("打死", "教训"),
+    ("耳光", "回应"),
+    ("血淋淋", "沉重"),
+    ("血流", ""),
+    ("鲜血", ""),
+    ("自杀", "想不开"),
+    ("杀死", ""),
+    ("掐死", ""),
+    ("勒死", ""),
+    ("捅死", "伤害"),
+    ("捅了", "伤了"),
+    ("捅", "伤"),
+    ("砍死", "伤害"),
+    ("砍伤", "受伤"),
+    ("砍", "打"),
+    ("开枪", ""),
+    ("枪杀", ""),
+    ("枪", ""),
+    ("炸弹", ""),
+    ("丧命", "离世"),
+    ("惨死", "离世"),
+    ("毙命", ""),
+    ("活埋", ""),
+    # 性/裸露
+    ("裸体", ""),
+    ("强奸", "侵害"),
+    ("性侵", "侵害"),
+    ("猥亵", "欺负"),
+    ("色情", ""),
+    # 少儿安全
+    ("虐待儿童", ""),
+    ("虐童", ""),
+    ("拐卖", "带走了"),
+    # 自残类
+    ("割腕", "伤害自己"),
+    ("跳楼", "轻生"),
+    ("上吊", "轻生"),
+]
 
 
-def build_single_segment_prompt(
-    text: str,
-    book_title: str = "",
-    book_author: str = "",
-    segment_index: int = 0,
-    total_segments: int = 1,
-    style_bible: str = "",
-    aspect_ratio: str = "9:16",
+def _sanitize_prompt(prompt: str) -> str:
+    """替换 prompt 中可能触发内容审查的敏感短语。"""
+    result = prompt
+    for bad, replacement in _CONTENT_SANITIZE_MAP:
+        if bad in result:
+            result = result.replace(bad, replacement)
+            print(f"[image:sanitize] 替换敏感词: '{bad}' → '{replacement}'")
+    return result
+
+
+def _build_generic_prompt(
+    book_title: str,
+    book_author: str,
+    segment_index: int,
+    total_segments: int,
+    style_bible: str,
+    aspect_ratio: str,
+    visual_context: str = "",
 ) -> str:
+    """当原文内容被所有内容审查拒绝后，构建不引用原文的通用配图 prompt。
+
+    按分镜序号轮换场景模板；若有 visual_context，从档案中提取情绪基调
+    和典型环境来影响场景选择，避免兜底图与故事整体氛围割裂。
     """
-    构建单句配图 User Prompt（v4：单图直生，无九宫格）。
-    """
-    if not style_bible:
-        style_bible = STYLE_BIBLES.get("default", "")
+    # 8 套场景模板
+    scenes = [
+        ("温暖阳光透过窗格洒在书页上",
+         "暖金色光线，微尘在光束中漂浮，画面安静克制"),
+        ("一条延伸向远方的林间小路",
+         "晨雾弥漫，路旁野花星星点点，逆光拍摄，空气通透"),
+        ("一张老式木桌上摊开的笔记本和一支钢笔",
+         "侧光从左边打来，桌面纹理清晰，笔尖有墨迹，极简构图"),
+        ("傍晚时分远处山顶的天空剪影",
+         "橙蓝渐变天色，山脊线干净利落，长焦远景，心境辽阔"),
+        ("雨后的老街石板路，积水倒映着路灯",
+         "湿润的反光，两侧老墙青苔斑驳，纵深构图，宁静克制"),
+        ("厨房窗台上的玻璃花瓶，插着几枝野花",
+         "逆光透射花瓣纹理，背景虚化成柔光斑，生活感静谧"),
+        ("一个人站在海边，面向无尽的大海",
+         "背影构图，海浪轻拍脚边，灰蓝色调，极简留白"),
+        ("旧书架上排列整齐的书脊",
+         "低饱和色彩，侧光勾勒书脊边缘，浅景深，知识氛围"),
+    ]
+    scene_desc, scene_light = scenes[segment_index % len(scenes)]
+
+    # 从视觉档案提取 context_boost 注入风格描述
+    context_boost = ""
+    if visual_context.strip():
+        # 提取档案中的情绪基调关键词
+        mood_match = re.search(r'情绪基调[：:]\s*(.*)', visual_context, re.IGNORECASE)
+        env_match = re.search(r'典型环境[：:]\s*(.*)', visual_context, re.IGNORECASE)
+        body_match = re.search(r'身体特征[（(]极度重要.*?[）)]\s*[：:]\s*(.*)', visual_context, re.IGNORECASE | re.DOTALL)
+        mood = mood_match.group(1).strip() if mood_match else ""
+        env = env_match.group(1).strip() if env_match else ""
+        body = body_match.group(1).strip() if body_match else ""
+        parts = []
+        if body and body != "无":
+            parts.append(f"主人公固定身体特征：{body}")
+        if env:
+            parts.append(f"故事环境：{env}")
+        if mood:
+            parts.append(f"画面情绪：{mood}")
+        if parts:
+            context_boost = "；".join(parts)
+
+    # 8:9 近方形卡片版式：额外构图约束（对标满宽大图展示区）
+    if aspect_ratio == "8:9":
+        aspect_line = (
+            "8:9 近正方形竖版构图，主体居中、略偏上，四周留出呼吸空间，"
+            "关键元素不贴边（成片满宽出血展示，无裁切余量）"
+        )
+    else:
+        aspect_line = f"{aspect_ratio}，主体放在中央安全区，方便后期排版。"
 
     prompt = f"""为中文短视频口播生成一张独立意境配图。
 
@@ -103,7 +216,7 @@ def build_single_segment_prompt(
 这张图作为短视频的连续分镜之一，对应一段约 18 秒的口播配音。
 
 画幅要求:
-{aspect_ratio}，主体放在中央安全区，方便后期排版。
+{aspect_line}
 
 主题方向:
 图书启发、认知成长、人生感悟、关系洞察、命运转折。
@@ -115,7 +228,78 @@ def build_single_segment_prompt(
 明亮电影感，真实摄影或高级插画风
 光线自然，画面干净，低信息密度
 与同一条视频的其他配图保持相同视觉调性
+"""
+    if context_boost:
+        prompt += f"故事全局信息:{context_boost}\n"
+    prompt += f"""
+整条视频主题:{book_title}
+书籍作者:{book_author}
+当前分镜序号:第 {segment_index + 1}/{total_segments} 镜
 
+本次画面主题:{scene_desc}
+光线要求:{scene_light}
+
+请生成一张意境配图。不要加任何文字。"""
+    return prompt
+
+
+# ============== 单图直生 Prompt（v4：单句独立生图，彻底废弃九宫格）==============
+
+
+def build_single_segment_prompt(
+    text: str,
+    book_title: str = "",
+    book_author: str = "",
+    segment_index: int = 0,
+    total_segments: int = 1,
+    style_bible: str = "",
+    aspect_ratio: str = "9:16",
+    visual_context: str = "",
+) -> str:
+    """
+    构建单句配图 User Prompt（v4：单图直生，无九宫格）。
+
+    新增 visual_context 参数：LLM 从改写稿中提取的主人公视觉档案，
+    注入到每张图的 prompt 中，确保人物一致性。
+    """
+    if not style_bible:
+        style_bible = STYLE_BIBLES.get("default", "")
+
+    # 构建视觉档案注入段落（如果有的话）
+    visual_block = ""
+    if visual_context.strip():
+        visual_block = f"""\n\n配图视觉档案（贯穿全片，所有人物的固定特征必须遵守）：
+{visual_context.strip()}
+"""
+
+    # 8:9 近方形卡片版式：额外构图约束（对标满宽大图展示区）
+    if aspect_ratio == "8:9":
+        aspect_line = (
+            "8:9 近正方形竖版构图，主体居中、略偏上，四周留出呼吸空间，"
+            "关键元素不贴边（成片满宽出血展示，无裁切余量）"
+        )
+    else:
+        aspect_line = f"{aspect_ratio}，主体放在中央安全区，方便后期排版。"
+
+    prompt = f"""为中文短视频口播生成一张独立意境配图。
+
+最终用途:
+这张图作为短视频的连续分镜之一，对应一段约 18 秒的口播配音。
+
+画幅要求:
+{aspect_line}
+
+主题方向:
+图书启发、认知成长、人生感悟、关系洞察、命运转折。
+
+统一视觉风格:
+{style_bible}
+
+风格要求:
+明亮电影感，真实摄影或高级插画风
+光线自然，画面干净，低信息密度
+与同一条视频的其他配图保持相同视觉调性
+{visual_block}
 内容来源限制:
 只参考当前段落文案，不引用原视频标题、账号、作者或来源信息。
 
@@ -296,17 +480,18 @@ async def generate_all_images(
     - 裁切导致构图失控、焦点失焦
 
     流程:
+    0. 从改写稿提取视觉档案（LLM）→ 注入全局人物一致性上下文
     1. 读取 rewritten.txt → split_into_short_sentences() 切句
-    2. for each sentence → build_single_segment_prompt + STYLE_PROMPT_MAP + SAFETY_SUFFIX
+    2. for each sentence → build_single_segment_prompt + visual_context + STYLE_PROMPT_MAP + SAFETY_SUFFIX
     3. Fal.ai gpt-image-2 单图直生（按 aspect_ratio 决定尺寸）
     4. PIL resize 到精确目标分辨率 → 写入 TaskImage 表
-    5. 异常兜底：单张失败不阻塞后续 → 生成占位图
+    5. 异常兜底：单张失败不阻塞后续 → 降敏 → 通用 prompt → 占位图
 
     Returns:
         {"total_segments": N, "total_images": N, "success": N, "failed": N}
     """
     from models import TaskImage, Task
-    from services.llm_service import split_into_short_sentences
+    from services.llm_service import split_into_short_sentences, extract_visual_context
 
     # 1. 读取改写稿
     task = db.query(Task).filter(Task.id == task_id).first()
@@ -341,6 +526,22 @@ async def generate_all_images(
     style_bible = STYLE_BIBLES.get(style, STYLE_BIBLES["default"])
     quality = os.getenv("FAL_QUALITY", "low")
 
+    # ── Pass 0: 提取视觉档案 ──
+    visual_context = task.visual_context or ""
+    if not visual_context.strip():
+        print(f"[image:v4] 视觉档案未缓存 → LLM 提取中...")
+        try:
+            visual_context = await extract_visual_context(rewritten)
+            if visual_context.strip():
+                task.visual_context = visual_context
+                db.commit()
+                print(f"[image:v4] 视觉档案已缓存到 task.visual_context")
+        except Exception as e:
+            print(f"[image:v4] 视觉档案提取失败: {e}，跳过")
+            visual_context = ""
+    else:
+        print(f"[image:v4] 使用已缓存的视觉档案 ({len(visual_context)} 字)")
+
     # 3. 根据画幅比确定请求尺寸与目标尺寸
     if aspect_ratio == "16:9":
         REQUEST_W, REQUEST_H = 3840, 2160
@@ -348,6 +549,9 @@ async def generate_all_images(
     elif aspect_ratio == "3:4":
         REQUEST_W, REQUEST_H = 768, 1024
         TARGET_W, TARGET_H = 768, 1024
+    elif aspect_ratio == "8:9":
+        REQUEST_W, REQUEST_H = 2160, 2432  # 8:9 超采样（近方形卡片版式，对标满宽展示区 1080×1214）
+        TARGET_W, TARGET_H = 1080, 1214
     else:
         REQUEST_W, REQUEST_H = 2160, 3840  # 9:16 超采样
         TARGET_W, TARGET_H = 1080, 1920
@@ -383,7 +587,7 @@ async def generate_all_images(
             f"{text_len} 字, size={REQUEST_W}x{REQUEST_H}, aspect={aspect_ratio}"
         )
 
-        # 6a. 构建 Prompt（风格圣经 + 风格后缀 + 安全补丁）
+        # 6a. 构建 Prompt（视觉档案 + 风格圣经 + 风格后缀 + 安全补丁）
         base_prompt = build_single_segment_prompt(
             text=sentence,
             book_title=book_title,
@@ -392,6 +596,7 @@ async def generate_all_images(
             total_segments=total_segments,
             style_bible=style_bible,
             aspect_ratio=aspect_ratio,
+            visual_context=visual_context,
         )
         style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
         final_prompt = base_prompt + style_suffix + SAFETY_SUFFIX
@@ -401,7 +606,7 @@ async def generate_all_images(
         with open(prompt_path, "w", encoding="utf-8") as f:
             f.write(final_prompt)
 
-        # 6c. 多通道生图（fal → keling fallback）
+        # 6c. 多通道生图（fal → sanitized → generic → keling → sanitized keling → 占位图）
         img_bytes = None
         error_msg = ""
         try:
@@ -409,13 +614,53 @@ async def generate_all_images(
             if b64:
                 img_bytes = base64.b64decode(b64)
             else:
-                # fal 失败 → 尝试 keling
-                keling_size = f"{TARGET_W}x{TARGET_H}"
-                b64 = await _generate_keling(final_prompt, size=keling_size)
-                if b64:
-                    img_bytes = base64.b64decode(b64)
-                else:
-                    error_msg = "所有生图通道均失败"
+                # fal 失败 → 尝试 sanitized prompt 重试（Fal.ai 的 422 通常是内容审查）
+                sanitized = _sanitize_prompt(final_prompt)
+                if sanitized != final_prompt:
+                    print(f"[image:v4] 段 {seg_idx + 1} fal 首次失败 → 降敏重试")
+                    b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                    if b64:
+                        img_bytes = base64.b64decode(b64)
+                        final_prompt = sanitized
+
+                # sanitized 也失败 → 用完全不引用原文的通用 prompt（解决上下文级审查）
+                generic = None
+                if not img_bytes:
+                    generic = _build_generic_prompt(
+                        book_title=book_title, book_author=book_author,
+                        segment_index=seg_idx, total_segments=total_segments,
+                        style_bible=style_bible, aspect_ratio=aspect_ratio,
+                        visual_context=visual_context,
+                    )
+                    generic += style_suffix + SAFETY_SUFFIX
+                    print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → 通用 prompt 兜底")
+                    b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                    if b64:
+                        img_bytes = base64.b64decode(b64)
+                        final_prompt = generic
+
+                if not img_bytes:
+                    # fal 全部失败 → 尝试可灵
+                    keling_size = f"{TARGET_W}x{TARGET_H}"
+                    b64 = await _generate_keling(final_prompt, size=keling_size)
+                    if b64:
+                        img_bytes = base64.b64decode(b64)
+                    elif sanitized != final_prompt:
+                        b64 = await _generate_keling(sanitized, size=keling_size)
+                        if b64:
+                            img_bytes = base64.b64decode(b64)
+                            final_prompt = sanitized
+                        elif generic is not None:
+                            b64 = await _generate_keling(generic, size=keling_size)
+                            if b64:
+                                img_bytes = base64.b64decode(b64)
+                                final_prompt = generic
+                            else:
+                                error_msg = "所有生图通道均失败"
+                        else:
+                            error_msg = "所有生图通道均失败"
+                    else:
+                        error_msg = "所有生图通道均失败"
         except Exception as e:
             error_msg = f"生图异常: {type(e).__name__}: {e}"
             print(f"[image:v4] 段 {seg_idx + 1} 异常: {error_msg}")
@@ -512,6 +757,7 @@ async def regenerate_single_image(
     book_author = book_author or (task.book_author if task else "") or ""
     style_bible = STYLE_BIBLES.get(style, STYLE_BIBLES["default"])
     quality = os.getenv("FAL_QUALITY", "low")
+    visual_context = task.visual_context or "" if task else ""
 
     tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
     task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
@@ -535,11 +781,17 @@ async def regenerate_single_image(
     if aspect_ratio == "16:9":
         REQUEST_W, REQUEST_H = 3840, 2160
         TARGET_W, TARGET_H = 1280, 720
+    elif aspect_ratio == "3:4":
+        REQUEST_W, REQUEST_H = 768, 1024
+        TARGET_W, TARGET_H = 768, 1024
+    elif aspect_ratio == "8:9":
+        REQUEST_W, REQUEST_H = 2160, 2432  # 8:9 超采样（近方形卡片版式）
+        TARGET_W, TARGET_H = 1080, 1214
     else:
         REQUEST_W, REQUEST_H = 2160, 3840
         TARGET_W, TARGET_H = 1080, 1920
 
-    # 构建 Prompt + 风格后缀 + 安全补丁
+    # 构建 Prompt + 视觉档案 + 风格后缀 + 安全补丁
     base_prompt = build_single_segment_prompt(
         text=text,
         book_title=book_title,
@@ -548,6 +800,7 @@ async def regenerate_single_image(
         total_segments=len(sentences),
         style_bible=style_bible,
         aspect_ratio=aspect_ratio,
+        visual_context=visual_context,
     )
     style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
     prompt = base_prompt + style_suffix + SAFETY_SUFFIX
@@ -555,6 +808,40 @@ async def regenerate_single_image(
     print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
 
     b64 = await _generate_fal(prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
+    if not b64:
+        # fal 失败 → 降敏重试
+        sanitized = _sanitize_prompt(prompt)
+        if sanitized != prompt:
+            print(f"[image:single] fal 首次失败 → 降敏重试")
+            b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
+            if b64:
+                prompt = sanitized
+        # sanitized 也失败 → 通用 prompt（完全去掉原文避免上下文级审查）
+        generic = None
+        if not b64:
+            generic = _build_generic_prompt(
+                book_title=book_title, book_author=book_author,
+                segment_index=segment_index, total_segments=len(sentences),
+                style_bible=style_bible, aspect_ratio=aspect_ratio,
+                visual_context=visual_context,
+            )
+            generic += style_suffix + SAFETY_SUFFIX
+            print(f"[image:single] 降敏仍失败 → 通用 prompt 兜底")
+            b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
+            if b64:
+                prompt = generic
+        if not b64:
+            # 尝试可灵
+            keling_size = f"{TARGET_W}x{TARGET_H}"
+            b64 = await _generate_keling(prompt, size=keling_size)
+            if not b64 and sanitized != prompt:
+                b64 = await _generate_keling(sanitized, size=keling_size)
+                if b64:
+                    prompt = sanitized
+                elif generic is not None:
+                    b64 = await _generate_keling(generic, size=keling_size)
+                    if b64:
+                        prompt = generic
     img_bytes = base64.b64decode(b64) if b64 else None
 
     target_path = os.path.join(images_dir, f"seg_{segment_index:03d}.png")

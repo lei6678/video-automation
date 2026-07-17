@@ -61,9 +61,12 @@ from starlette.responses import Response
 @app.middleware("http")
 async def cors_preflight_middleware(request: Request, call_next):
     origin = request.headers.get("origin", "")
-    # 允许的开发服务器 origin
-    allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174"]
-    if origin and any(origin.startswith(o) for o in allowed_origins):
+    # 允许的开发服务器 & 局域网 origin（vite dev / LAN 直连）
+    allowed_prefixes = [
+        "http://localhost:", "http://127.0.0.1:",
+        "http://192.168.", "http://10.", "http://172.",
+    ]
+    if origin and any(origin.startswith(p) for p in allowed_prefixes):
         headers = {
             "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Credentials": "true",
@@ -89,7 +92,11 @@ async def cors_preflight_middleware(request: Request, call_next):
 
 @app.get("/")
 async def root():
-    """健康检查接口"""
+    """首页：有前端构建产物时返回工作台页面，否则返回 API 状态"""
+    dist_index = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html")
+    if os.path.exists(dist_index):
+        from fastapi.responses import FileResponse
+        return FileResponse(dist_index, media_type="text/html")
     return {"status": "ok", "message": "视频自动化制作工作流 API"}
 
 
@@ -124,6 +131,7 @@ class TaskDetailResponse(BaseModel):
     book_author: str | None = None
     video_title: str | None = None
     content_mode: str | None = "book"
+    visual_context: str | None = None
     error_msg: str | None
     created_at: datetime
 
@@ -142,7 +150,7 @@ class CleanTextResponse(BaseModel):
 class RewriteRequest(BaseModel):
     """脚本改写请求"""
     task_id: int
-    mode: str  # "rewrite" 或 "light_dedupe"
+    mode: str = "rewrite"  # 深度改写（已合并为单一模式，保留字段为兼容）
 
 
 class RewriteResponse(BaseModel):
@@ -234,6 +242,22 @@ class CreateTaskFromTextResponse(BaseModel):
     raw_transcript: str
     status: str
     current_step: int
+
+
+class ImportRewrittenRequest(BaseModel):
+    """直接导入已改好的文案（跳过 AI 改写）"""
+    rewritten_text: str       # 改写后的完整文案正文
+    video_title: str = ""     # 爆款标题
+    raw_text: str = ""        # 原始文案（可选，留空则用 rewritten_text 代替）
+    content_mode: str = "book"  # "book" | "general"
+
+
+class ImportRewrittenResponse(BaseModel):
+    """导入改写文案响应"""
+    task_id: int
+    rewritten: str
+    video_title: str
+    message: str
 
 
 class ExtractResponse(BaseModel):
@@ -333,6 +357,9 @@ class ComposeVideoRequest(BaseModel):
     video_title: str = ""
     slogan: str = "- 品读传奇人生 -"
     subtitle_line: str = "图片由AI生成与网络下载\\n科普视频 无不良引导"
+    # v8 对标卡片模式：双色标题两行（留空则由 LLM 自动拆分 video_title/书名）
+    title_line1: str = ""
+    title_line2: str = ""
 
 
 class ComposeVideoResponse(BaseModel):
@@ -348,6 +375,8 @@ class ComposeVideoResponse(BaseModel):
     srt_url: str | None = None
     ass_url: str | None = None
     jianying_draft_url: str | None = None
+    jianying_published: bool = False
+    jianying_draft_name: str | None = None
     black_placeholder_count: int = 0
     # v5: typewriter 裂变成品
     video_url_typewriter: str | None = None
@@ -357,6 +386,12 @@ class ComposeVideoResponse(BaseModel):
     video_url_card: str | None = None
     duration_sec_card: float | None = None
     size_mb_card: float | None = None
+    # v8: bench 对标卡片裂变成品
+    video_url_bench: str | None = None
+    duration_sec_bench: float | None = None
+    size_mb_bench: float | None = None
+    # v9: 成品库归档路径
+    archive_path: str | None = None
 
 
 class VideoStyleInfo(BaseModel):
@@ -444,6 +479,52 @@ async def create_task_from_text(request: CreateTaskFromTextRequest, db: Session 
     )
 
 
+@app.post("/api/tasks/import-rewritten", response_model=ImportRewrittenResponse)
+async def import_rewritten(request: ImportRewrittenRequest, db: Session = Depends(get_db)):
+    """
+    直接导入已改写好的文案——跳过清洗和 AI 改写步骤，直接进入配音/生图/合成。
+
+    适用场景：用户在网页版 DeepSeek 对话窗口中手动改写后，粘贴回来继续生产。
+    """
+    raw_text = request.raw_text.strip() or request.rewritten_text
+    rewritten_text = request.rewritten_text
+
+    task = Task(
+        source_url="manual:import",
+        status="rewritten",
+        current_step=2,
+        raw_transcript=raw_text,
+        rewritten_transcript=rewritten_text,
+        video_title=request.video_title,
+        content_mode=request.content_mode,
+        douyin_meta={"title": request.video_title, "author": "手动导入"},
+        created_at=datetime.utcnow()
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    # 创建任务文件夹 + 写入所有需要的文件
+    task_folder = os.path.join(TASKS_DIR, str(task.id))
+    os.makedirs(task_folder, exist_ok=True)
+
+    for fname, content in [
+        ("raw.txt", raw_text),
+        ("cleaned.txt", rewritten_text),    # 清洗稿=改写稿，保持一致
+        ("rewritten.txt", rewritten_text),
+    ]:
+        with open(os.path.join(task_folder, fname), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    print(f"[import-rewritten] 导入任务 {task.id}: {len(rewritten_text)} 字, 标题: {request.video_title[:30] if request.video_title else '(无)'}")
+    return ImportRewrittenResponse(
+        task_id=task.id,
+        rewritten=rewritten_text,
+        video_title=request.video_title,
+        message=f"已导入，可直接开始配音/生图/合成",
+    )
+
+
 @app.get("/api/tasks/{task_id}", response_model=TaskDetailResponse)
 async def get_task_detail(task_id: int, db: Session = Depends(get_db)):
     """
@@ -468,6 +549,7 @@ async def get_task_detail(task_id: int, db: Session = Depends(get_db)):
         book_author=task.book_author,
         video_title=task.video_title,
         content_mode=task.content_mode,
+        visual_context=task.visual_context,
         douyin_meta=task.douyin_meta or {},
         error_msg=task.error_msg,
         created_at=task.created_at,
@@ -869,10 +951,7 @@ async def clean_text(request: CleanTextRequest, db: Session = Depends(get_db)):
 @app.post("/api/rewrite", response_model=RewriteResponse)
 async def rewrite(request: RewriteRequest, db: Session = Depends(get_db)):
     """
-    v5 改写：同时生成爆款标题 + 改写正文，输出 JSON 结构化数据。
-
-    - mode="rewrite": 深度改写，适合混剪
-    - mode="light_dedupe": 轻量去重，适合矩阵二创
+    v5 改写：深度改写 + 生成爆款标题，输出 JSON 结构化数据。
 
     结果保存到 task.rewritten_transcript / task.video_title 和本地文件
     """
@@ -898,7 +977,7 @@ async def rewrite(request: RewriteRequest, db: Session = Depends(get_db)):
 
     # 调用改写函数（v5 返回 dict）
     try:
-        result = await do_rewrite(task_id, cleaned_text, mode, db)
+        result = await do_rewrite(task_id, cleaned_text, db, mode)
         rewritten = result["rewritten_transcript"]
         video_title = result.get("video_title", "")
     except Exception as e:
@@ -1532,8 +1611,9 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
     """
     from services.video_service import (
         compose_final_video, compose_final_video_typewriter,
-        compose_final_video_card, compose_final_video_card_v6, VIDEO_STYLES,
-        split_into_word_groups, get_audio_duration,
+        compose_final_video_card, compose_final_video_card_v6,
+        compose_final_video_card_bench, VIDEO_STYLES,
+        split_into_word_groups, get_audio_duration, auto_publish_to_jianying,
     )
     from services.llm_service import split_into_short_sentences
     import os as _os
@@ -1579,13 +1659,70 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         f"《{task.book_title or ''}》{task.book_author or ''}" if task.book_title else ""
     )
 
-    # 共享的 seg_durations（按字符比例，供 typewriter/card 使用）
+    # 共享的 seg_durations
     total_dur = get_audio_duration(final_audio) if _os.path.exists(final_audio) else 0.0
     total_chars = sum(len(s) for s in sentences) or 1
-    seg_durations_shared = [len(s) / total_chars * total_dur for s in sentences]
+
+    # v8: 优先用 TTS 实际分段时长构建"字符进度→时间"分段线性映射（修复音画渐进漂移）。
+    # 纯字符比例假设语速恒定，误差随时长累积；实际映射让误差在每个 TTS 段边界归零。
+    from models import TaskImage, TaskSegment
+    seg_durations_shared = None
+    tts_segs = (
+        db.query(TaskSegment)
+        .filter(TaskSegment.task_id == task_id, TaskSegment.status == "success")
+        .order_by(TaskSegment.segment_index)
+        .all()
+    )
+    if tts_segs and total_dur > 0:
+        tts_durs: list[float] = []
+        tts_lens: list[int] = []
+        for seg in tts_segs:
+            d = (
+                get_audio_duration(seg.audio_path)
+                if seg.audio_path and _os.path.exists(seg.audio_path)
+                else 0.0
+            )
+            if d <= 0:
+                tts_durs = []
+                break
+            tts_durs.append(d)
+            tts_lens.append(max(len(seg.text or ""), 1))
+        if tts_durs:
+            # final_tts 是无缝 concat，按实际总时长微调（消除封装误差）
+            scale = total_dur / sum(tts_durs)
+            tts_durs = [d * scale for d in tts_durs]
+            # 锚点：(字符进度占比, 累计时间)
+            tts_total_chars = sum(tts_lens)
+            anchors: list[tuple[float, float]] = [(0.0, 0.0)]
+            c_acc, t_acc = 0, 0.0
+            for seg_len, seg_dur in zip(tts_lens, tts_durs):
+                c_acc += seg_len
+                t_acc += seg_dur
+                anchors.append((c_acc / tts_total_chars, t_acc))
+
+            def _time_at(frac: float) -> float:
+                for (f0, t0), (f1, t1) in zip(anchors, anchors[1:]):
+                    if frac <= f1:
+                        return t0 + (frac - f0) / (f1 - f0) * (t1 - t0) if f1 > f0 else t1
+                return anchors[-1][1]
+
+            seg_durations_shared = []
+            c_pos = 0
+            for s in sentences:
+                start_t = _time_at(c_pos / total_chars)
+                c_pos += len(s)
+                end_t = _time_at(c_pos / total_chars)
+                seg_durations_shared.append(end_t - start_t)
+            print(
+                f"[compose] 音画对齐: 用 {len(tts_durs)} 个 TTS 实际分段时长映射 "
+                f"{len(sentences)} 个句子时长（替代纯字符比例估算）"
+            )
+    if seg_durations_shared is None:
+        # 回退：纯字符比例估算（TTS 分段音频缺失时）
+        seg_durations_shared = [len(s) / total_chars * total_dur for s in sentences]
+        print("[compose] 音画对齐: TTS 分段时长不可用，回退字符比例估算")
 
     # 共享的 image_paths（供 card 使用）
-    from models import TaskImage
     image_records = (
         db.query(TaskImage)
         .filter(TaskImage.task_id == task_id, TaskImage.status == "success")
@@ -1604,6 +1741,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
     result_cinematic = {}
     result_tw = {}
     result_card = {}
+    result_bench = {}
 
     # === 1) cinematic（主力：AI 配图 + Ken Burns） ===
     if "cinematic" in request.modes:
@@ -1656,9 +1794,102 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
             subtitle_line=request.subtitle_line,
         )
 
+    # === 4) bench（v8 对标卡片：深藏青底 + 8:9 满宽大图 + 双色标题） ===
+    if "bench" in request.modes:
+        t1 = request.title_line1.strip()
+        t2 = request.title_line2.strip()
+        if not (t1 or t2):
+            raw_title = request.video_title or request.title or task.book_title or ""
+            if raw_title:
+                from services.llm_service import split_title_two_lines
+                split = await split_title_two_lines(
+                    raw_title,
+                    book_title=task.book_title or "",
+                    book_author=task.book_author or "",
+                )
+                t1 = split.get("line1", "")
+                t2 = split.get("line2", "")
+        result_bench = await compose_final_video_card_bench(
+            task_id=task_id,
+            db=db,
+            sentences=sentences,
+            seg_durations=seg_durations_shared,
+            image_paths=image_paths_shared,
+            task_dir=task_dir,
+            final_audio=final_audio,
+            title_line1=t1,
+            title_line2=t2,
+            slogan=request.slogan,
+            subtitle_line=request.subtitle_line,
+        )
+
     # === 组装响应 ===
-    # 主输出优先级：card > cinematic > typewriter
-    primary = result_card if result_card else (result_cinematic if result_cinematic else result_tw)
+    # 主输出优先级：bench > card > cinematic > typewriter
+    primary = result_bench if result_bench else (
+        result_card if result_card else (result_cinematic if result_cinematic else result_tw)
+    )
+
+    # === 剪映草稿：任何模式成功都重新生成（v8 修复：原来只有 cinematic 内部生成，
+    # bench/card 模式跑完后 task_dir 无 draft_content.json，自动发布静默跳过）===
+    if primary and "error" not in primary:
+        try:
+            from services.video_service import export_jianying_draft
+            export_jianying_draft(
+                task_id=task_id,
+                task_dir=task_dir,
+                sentences=sentences,
+                seg_durations=seg_durations_shared,
+                image_paths=image_paths_shared,
+                audio_path=final_audio,
+            )
+        except Exception as e:
+            print(f"[compose] 剪映草稿生成失败: {e}")
+
+    # === 成品库归档：复制成片到统一平铺目录（v9：便于直接上传发布平台）===
+    archive_path = None
+    if primary and "error" not in primary and primary.get("video_path"):
+        try:
+            import shutil as _shutil
+            out_dir = os.getenv("FINAL_OUTPUT_DIR", r"E:\成片输出")
+            _os.makedirs(out_dir, exist_ok=True)
+            safe_title = (request.video_title or task.book_title or f"task{task_id}").strip()
+            for bad in '<>:"/\\|?*\n\r\t':
+                safe_title = safe_title.replace(bad, "_")
+            safe_title = safe_title[:60] or f"task{task_id}"
+            date_tag = datetime.now().strftime("%m%d")
+            base_name = f"{date_tag}_{safe_title}"
+            dest = _os.path.join(out_dir, f"{base_name}.mp4")
+            n = 1
+            while _os.path.exists(dest):
+                n += 1
+                dest = _os.path.join(out_dir, f"{base_name}_{n}.mp4")
+            _shutil.copy2(primary["video_path"], dest)
+            archive_path = dest
+            print(f"[compose] 成片已归档: {dest}")
+        except Exception as e:
+            print(f"[compose] 成片归档失败（不影响成片）: {e}")
+
+    # === 自动发布到剪映草稿箱 ===
+    jianying_published = False
+    jianying_draft_name = None
+    try:
+        published = await asyncio.to_thread(
+            auto_publish_to_jianying,
+            task_id=task_id,
+            task_dir=task_dir,
+            image_paths=image_paths_shared,
+            audio_path=final_audio,
+            draft_name=request.video_title or f"Task_{task_id}",
+        )
+        jianying_published = published
+        if published:
+            jianying_draft_name = request.video_title or f"VideoAuto_Task_{task_id}"
+            # 去掉 Windows 文件名不允许的字符
+            for bad in '<>:"/\\|?*':
+                jianying_draft_name = jianying_draft_name.replace(bad, "_")
+    except Exception as e:
+        print(f"[compose] 自动发布到剪映失败: {e}")
+
     if "error" in primary:
         return ComposeVideoResponse(
             task_id=task_id,
@@ -1678,6 +1909,8 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         msg_parts.append(f"大字版 {result_tw.get('duration_sec', 0)}s")
     if result_card:
         msg_parts.append(f"卡片 {result_card.get('duration_sec', 0)}s")
+    if result_bench:
+        msg_parts.append(f"对标卡片 {result_bench.get('duration_sec', 0)}s")
 
     return ComposeVideoResponse(
         task_id=task_id,
@@ -1690,7 +1923,12 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         message="成片完成！" + " + ".join(msg_parts),
         srt_url=primary.get("srt_url"),
         ass_url=primary.get("ass_url"),
-        jianying_draft_url=primary.get("jianying_draft_url"),
+        jianying_draft_url=primary.get("jianying_draft_url") or (
+            f"/video/{task_id}/draft_content.json"
+            if _os.path.exists(_os.path.join(task_dir, "draft_content.json")) else None
+        ),
+        jianying_published=jianying_published,
+        jianying_draft_name=jianying_draft_name,
         black_placeholder_count=primary.get("black_placeholder_count", 0),
         video_url_typewriter=result_tw.get("video_url") if "error" not in result_tw else None,
         duration_sec_typewriter=result_tw.get("duration_sec") if "error" not in result_tw else None,
@@ -1698,6 +1936,10 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         video_url_card=result_card.get("video_url") if "error" not in result_card else None,
         duration_sec_card=result_card.get("duration_sec") if "error" not in result_card else None,
         size_mb_card=result_card.get("size_mb") if "error" not in result_card else None,
+        video_url_bench=result_bench.get("video_url") if "error" not in result_bench else None,
+        duration_sec_bench=result_bench.get("duration_sec") if "error" not in result_bench else None,
+        size_mb_bench=result_bench.get("size_mb") if "error" not in result_bench else None,
+        archive_path=archive_path,
     )
 
 
@@ -1747,6 +1989,20 @@ async def get_video_styles():
             {"key": k, **v} for k, v in VIDEO_STYLES.items()
         ]
     }
+
+
+# ============== 成品库（v9）==============
+
+@app.post("/api/open-output-dir")
+async def open_output_dir():
+    """在服务器本机打开成品库文件夹（仅主机浏览器点击有意义，远程同事请用下载按钮）"""
+    out_dir = os.getenv("FINAL_OUTPUT_DIR", r"E:\成片输出")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        os.startfile(out_dir)  # Windows 资源管理器打开
+        return {"ok": True, "path": out_dir}
+    except Exception as e:
+        return {"ok": False, "path": out_dir, "error": str(e)}
 
 
 # ============== 剪映草稿下载接口 ==============
@@ -1806,6 +2062,67 @@ async def download_subtitles(task_id: int, format: str = "srt"):
     )
 
 
+# ============== 前端静态托管（v9：局域网单端口部署）==============
+# 挂在所有 API 路由之后：/api /audio /images /video /docs 优先命中，
+# 其余路径由前端 SPA 接管。frontend/dist 不存在时跳过（纯开发模式）。
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
+    print(f"[main] 前端已托管: {os.path.abspath(_FRONTEND_DIST)} → http://<本机>:8000/")
+else:
+    print("[main] frontend/dist 不存在，跳过前端托管（开发模式请用 npm run dev）")
+
+
+def _detect_lan_ip() -> str:
+    """
+    探测本机真实的局域网 IP（排除虚拟网卡 / WSL / VPN 等虚拟适配器）。
+    优先返回 WiFi，其次返回有线网卡。只有一台，不需要辨认。
+    """
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command",
+             # 取 IPv4，排除回环和虚拟适配器 → 按 PhysicalAdapter 优先 → 取 IP
+             "(Get-NetIPAddress -AddressFamily IPv4 "
+             "-InterfaceAlias 'WLAN','Wi-Fi','Ethernet','以太网','WLAN*','Wi-Fi*','以太网*' "
+             "-PolicyStore ActiveStore -ErrorAction SilentlyContinue "
+             "| Sort-Object -Property { -not $_.InterfaceAlias.match('WLAN|Wi-Fi') } "
+             "| Select-Object -First 1).IPAddress"],
+            timeout=5, encoding="utf-8", errors="replace")
+        ip = out.strip()
+        if ip:
+            return ip
+    except Exception:
+        pass
+    # 回退：socket 探测
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        s.connect(("192.168.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        ip_str = str(ip)
+        if ip_str.startswith("192.168.") or ip_str.startswith("10.") or ip_str.startswith("172."):
+            return ip_str
+    except Exception:
+        pass
+    return ""
+
+
 if __name__ == "__main__":
     import uvicorn
+
+    print("=" * 56)
+    print("  Video Automation Server")
+    print("=" * 56)
+    lan_ip = _detect_lan_ip()
+    if lan_ip:
+        print(f"  Colleagues:       http://{lan_ip}:8000")
+    else:
+        print("  Colleagues:       (not detected — check WiFi/cable)")
+    print(f"  Yourself:         http://localhost:8000")
+    print(f"  API docs:         http://localhost:8000/docs")
+    print("=" * 56)
+    print()
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -72,89 +72,66 @@ async def clean_asr_text(
 
 # ============== 脚本改写函数 =============
 
-SYSTEM_PROMPT_REWRITE = """# Role: 短视频（抖音/快手/视频号）爆款故事文案改写大师
+# 提示词文件目录
+import os as _os
+_PROMPTS_DIR = _os.path.join(_os.path.dirname(__file__), "..", "prompts")
 
-## Profile
-你是一个部署在自动化生产线 API 环境中的顶级故事文案洗稿过审专家。你极其擅长用【最接地气的民间拉家常口吻】讲故事，同时能巧妙避开平台的文案查重机制。你的改写兼具"市井烟火气"与"高光时刻直击人心的力量"。
+# 提示词缓存（文件内容只在模块首次使用时加载一次）
+_PROMPT_CACHE: dict[str, str] = {}
 
-## 核心死律（任何情况下违背均会导致系统级崩溃）
-
-1. 绝对格式死律 (Anti-Markdown & Zero-Noise)：
-   - 严禁输出任何 Markdown 标签（严禁出现 #, *, -, >, _, ` 等符号），严禁包含任何小标题。
-   - 严禁输出任何引言、结束语、客套话、括号备注（例如严禁输出"为您改写如下："或"（此处语气加重）"或"[背景音乐]"）。
-   - 严禁一句一换行！必须按照正常的叙事逻辑划分自然段落，呈现出自然的段落块状。
-
-2. 极端数字汉化与格式死律 (Total Number Sinicization)：
-   - 最终输出的文案中，绝对不允许出现任何一个阿拉伯数字（0-9）或百分号（%）。
-   - 必须将所有数字、年份、百分比、金额全部转换为对应的【简体中文纯汉字】读法。
-   - 规范：[1924年] 变 [一九二四年]；[120斤] 变 [一百二十斤]；[20%] 变 [百分之二十]。
-
-3. 骨架与爆点铁壁 (Skeleton Preservation)：
-   - 首尾雷打不动：原文的第一句（前3-5秒爆款引子）必须【逐字保留，100%原封不动】，严禁修改任何一个字！结尾的升华和点赞引导也必须保持原有逻辑。
-   - 核心资产留存：故事的时空线、关键数字、人物姓名、人物对话的原始意思必须 100% 完整保留，严禁删减核心情节。
-
-4. 爆款标题生成规则 (Viral Title Generation)：
-   你必须基于故事内容设计【1个】极具情绪张力、方便做视频封面的爆款标题。
-   - 字数限制：严格控制在 15-25 字以内。
-   - 公式二选一，必须严格符合且仅符合以下爆款公式之一：
-     公式一（极限反差法）：[极弱/极惨的主角人设] + [极强/极高光的逆袭/坚守结果]（如：10岁失去双臂的男孩，用脚弹上金色大厅）
-     公式二（数字具象化）：用最极端的对比数字，将主角的苦难或执念放大到极致（如：一根扁担挑大7个弟妹的山西大哥）
-   - 【数字表现红线】：标题内所有涉及的数字，在标题里必须严格使用"阿拉伯数字"（如：10岁、7个、6000公里）。改写后的文案正文主体内，所有涉及的数字必须全部使用"中文汉字"（如：十岁、七个、六千公里）。两者在代码输出前必须做好分流过滤！
-   - 输出格式：必须输出严格的 JSON，不带任何 Markdown 代码块或解释文字。格式为：
-     {"title": "生成的爆款标题", "rewritten_transcript": "改写后的口播纯正文"}"""
-
-SYSTEM_PROMPT_LIGHT_DEDUP = SYSTEM_PROMPT_REWRITE
-
-USER_PROMPT_REWRITE = """请使用以下【市井烟火气对抗型洗稿技术】对目标原文进行改写。
-
-## 强控级改写业务指令：
-
-1. 【彻底去掉AI味，主打民间口播口吻】：
-   - 拒绝翻译感、拒绝车轱辘话和机械因果关系。说话要像一个活生生的、有血有肉的人在聊天，多用老百姓听得懂、感觉亲切的市井大白话。
-   - 句式要极短，多用逗号。改写的手段是"换大白话和画面感的说法"，而不是生硬找同义词，必须保证AI配音读起来顺口、有呼吸感。
-   - 示例：将"成婚数载"改为"结婚几年"；将"潜回上海"改为"偷偷回到上海"。
-
-2. 【保留适度词汇，让文案有深度质感】：
-   - 虽然主打民间口语，但不需要死板地避免所有庄重或文艺词汇。
-   - 在故事的【高光时刻、转折点、或情感爆发处】，要正常保留或适当加入一些有分量、有深度的词（如：命里的刀锋、傲骨嶙峋、死不瞑目、撒手人寰等），用这些词来给故事定调，让文案显得有质感，不廉价。
-
-3. 【自然融入三大爆款去重逻辑（切忌用力过猛，要自然过渡）】：
-   - 【第二人称代入法】：在需要引起共鸣的过渡段，适度用"如果你"、"换作是你"拉近与观众的距离，打破原有句式。
-   - 【细节具象化法】：把原视频中抽象、概括的词，翻译成大白话的生活细节或画面（例如：把"不开心"改写为"天天看着围墙里的四角天空，心里直发堵"），为后续AI配图留出空间。
-   - 【旁观者冷眼对比法】：如果故事涉及冲突或逆袭，适度放大"周围看热闹、嚼舌根的人"的冷言冷语，再用主角的行动狠狠打脸，拉满情绪张力。
-
-4. 【破除连续七字死律】：
-   - 除原封不动保留的第一句、汉化数字和人名外，文中严禁连续出现 7 个以上与原文完全相同的汉字。一旦超过，必须通过上述动作、画面、口语垫字进行像素级打碎。
-
-5. 【字数控制】：
-   - 改写后的文案总字数与原文案总字数的差异必须控制在增减 10% 到 15% 的范围内，不得大幅缩水或膨胀。
-
-## 输出格式
-你的输出必须是纯 JSON，不带任何 Markdown 代码块（严禁 ```json 或 ``` 围栏），不带任何解释或废话。
-格式示例：{"title":"爆款标题(15-25字，阿拉伯数字)","rewritten_transcript":"口播纯正文(全部中文汉字)"}
-
-## 目标原文（由下游脚本动态传入）：
-\"\"\"
-{cleaned_text}
-\"\"\""""
-
-USER_PROMPT_LIGHT_DEDUP = USER_PROMPT_REWRITE
+def _load_prompt(filename: str) -> str:
+    """从 prompts/ 目录加载提示词文件，带内存缓存"""
+    if filename not in _PROMPT_CACHE:
+        filepath = _os.path.join(_PROMPTS_DIR, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                _PROMPT_CACHE[filename] = f.read()
+            print(f"[llm_service] 加载提示词文件: {filename}")
+        except FileNotFoundError:
+            print(f"[llm_service] WARNING: 提示词文件缺失 {filepath}，请创建该文件")
+            _PROMPT_CACHE[filename] = ""
+    return _PROMPT_CACHE[filename]
 
 
-async def rewrite_script(task_id: int, cleaned_text: str, mode: str, db: Session) -> dict:
+async def extract_visual_context(rewritten_text: str) -> str:
+    """从改写稿中提取主人公视觉档案，用于配图人物一致性。
+
+    调用 DeepSeek API 分析文案，返回一份包含角色外貌、身体特征、
+    时代背景、典型环境、情绪基调的文本档案。每次配图时会注入此档案。
+
+    成本: ~1000 token 输入 + ~200 token 输出，约 ¥0.002
     """
-    调用 DeepSeek API 对清洗后的正文进行改写，同时生成爆款标题。
+    if not rewritten_text.strip():
+        return ""
 
-    Args:
-        task_id: 任务 ID
-        cleaned_text: 清洗后的正文
-        mode: 改写模式，"rewrite"（深度改写）或 "light_dedupe"（轻量去重）
-        db: 数据库会话
+    context_template = _load_prompt("image_context.txt")
+    user_prompt = context_template.replace("{rewritten_text}", rewritten_text)
 
-    Returns:
-        {"rewritten_transcript": str, "video_title": str}
+    print(f"[llm_service] 提取视觉档案, 文案长度: {len(rewritten_text)} 字")
+
+    response = await client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "你是一个严谨的视觉档案提取助手。只提取文案中明确提到的信息，不要编造任何细节。"},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.1,
+        max_tokens=1024,
+    )
+
+    result = response.choices[0].message.content or ""
+    print(f"[llm_service] 视觉档案提取完成: {len(result)} 字")
+    print(f"[llm_service] 视觉档案内容:\n{result[:300]}")
+    return result.strip()
+
+
+async def rewrite_script(task_id: int, cleaned_text: str, db: Session, mode: str = "rewrite") -> dict:
+    """
+    双 pass 架构：Pass 1 检索人物背景知识 → Pass 2 基于知识改写。
+    解决 API 模式下 deepseek-chat 不会主动"回忆"预训练知识的问题。
     """
     import json as _json
+    import re as _re
 
     # 验证 Task 存在
     from models import Task
@@ -162,49 +139,102 @@ async def rewrite_script(task_id: int, cleaned_text: str, mode: str, db: Session
     if not task:
         raise ValueError(f"[llm_service] 任务 {task_id} 不存在")
 
-    # 两个模式共用同一套洗稿过审专家提示词
-    if mode not in ("rewrite", "light_dedupe"):
-        raise ValueError(f"[llm_service] 未知改写模式: {mode}，请使用 'rewrite' 或 'light_dedupe'")
+    # ── Pass 1: 人物背景知识检索 ──
+    print(f"[llm_service] Pass 1: 人物背景知识检索, task_id: {task_id}")
+    research_template = _load_prompt("rewrite_research.txt")
+    research_prompt = research_template.replace("{cleaned_text}", cleaned_text)
 
-    user_prompt = USER_PROMPT_REWRITE.format(cleaned_text=cleaned_text)
+    research_response = await client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "你是一个人物背景知识检索助手。你的唯一任务是从文本中识别主角，列出你预训练记忆中关于他们的所有已知信息。不要改写，不要评价，只输出事实。"},
+            {"role": "user", "content": research_prompt}
+        ],
+        temperature=0.3,
+        max_tokens=4096,
+    )
+    background_knowledge = research_response.choices[0].message.content or ""
+    print(f"[llm_service] Pass 1 完成: 检索到 {len(background_knowledge)} 字背景知识")
+    print(f"[llm_service] Pass 1 前 150 字符: {background_knowledge[:150]}")
 
-    print(f"[llm_service] rewrite_script 模式: {mode}, task_id: {task_id}")
+    # ── Pass 2: 基于背景知识改写 ──
+    print(f"[llm_service] Pass 2: 融合背景知识改写, task_id: {task_id}")
+    system_prompt = _load_prompt("rewrite_system.txt")
+    user_template = _load_prompt("rewrite_user.txt")
+    user_prompt = user_template.replace("{background_knowledge}", background_knowledge).replace("{cleaned_text}", cleaned_text)
 
     response = await client.chat.completions.create(
         model="deepseek-chat",
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT_REWRITE},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        temperature=0.7,
+        temperature=0.9,
         max_tokens=8192,
-        response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content or "{}"
-    print(f"[llm_service] rewrite_script 原始返回前 200 字符: {raw[:200]}")
+    raw = response.choices[0].message.content or ""
+    print(f"[llm_service] Pass 2 原始返回前 200 字符: {raw[:200]}")
 
-    # 清理可能的 markdown 代码块围栏
+    # ── 多策略提取 JSON ──
+    rewritten = ""
+    video_title = ""
+
+    # 策略 1：直接 json.loads
     raw_clean = raw.strip()
     if raw_clean.startswith("```"):
-        # 去掉 ```json 或 ``` 围栏
-        raw_clean = raw_clean.split("\n", 1)[-1] if "\n" in raw_clean else raw_clean[3:]
-        if raw_clean.endswith("```"):
-            raw_clean = raw_clean[:-3]
+        raw_clean = _re.sub(r'^```(?:json)?\s*', '', raw_clean)
+        raw_clean = _re.sub(r'\s*```$', '', raw_clean)
         raw_clean = raw_clean.strip()
-
     try:
         parsed = _json.loads(raw_clean)
         rewritten = parsed.get("rewritten_transcript", "")
         video_title = parsed.get("title", "")
+        if rewritten.strip():
+            print(f"[llm_service] 策略1 (直接JSON) 成功: 正文 {len(rewritten)} 字, 标题: {video_title[:30] if video_title else '(无)'}")
     except _json.JSONDecodeError:
-        # 解析失败：全文当作正文，标题留空
-        print(f"[llm_service] JSON 解析失败，回退为纯文本")
-        rewritten = raw
-        video_title = ""
+        # 策略 2：正则从全文提取 JSON 对象
+        json_pattern = _re.compile(r'\{\s*"title"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"rewritten_transcript"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', _re.DOTALL)
+        match = json_pattern.search(raw)
+        if match:
+            for label, target in [("标题", "video_title"), ("正文", "rewritten")]:
+                raw_val = match.group(1) if target == "video_title" else match.group(2)
+                try:
+                    decoded = _json.loads(f'"{raw_val}"')
+                except _json.JSONDecodeError:
+                    decoded = _re.sub(r'\\(.)', r'\1', raw_val)
+                if target == "video_title":
+                    video_title = decoded
+                else:
+                    rewritten = decoded
+            print(f"[llm_service] 策略2 (正则提取JSON) 成功: 正文 {len(rewritten)} 字, 标题: {video_title[:30]}")
+        else:
+            # 策略 3：分别正则提取
+            title_m = _re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+            if title_m:
+                try:
+                    video_title = _json.loads(f'"{title_m.group(1)}"')
+                except _json.JSONDecodeError:
+                    video_title = _re.sub(r'\\(.)', r'\1', title_m.group(1))
+                print(f"[llm_service] 策略3 提取标题: {video_title[:40]}")
+            body_m = _re.search(r'"rewritten_transcript"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+            if body_m:
+                try:
+                    rewritten = _json.loads(f'"{body_m.group(1)}"')
+                except _json.JSONDecodeError:
+                    rewritten = _re.sub(r'\\(.)', r'\1', body_m.group(1))
+                print(f"[llm_service] 策略3 提取正文: {len(rewritten)} 字")
+            else:
+                # 策略 4：全文回退
+                print(f"[llm_service] 所有JSON提取策略失败，全文回退为纯文本")
+                rewritten = raw
+                lines = raw.strip().split("\n")
+                first_line = lines[0].strip() if lines else ""
+                if first_line and len(first_line) <= 30 and not first_line.startswith("{"):
+                    video_title = first_line
 
     if not rewritten.strip():
-        rewritten = raw  # 极端兜底
+        rewritten = raw
 
     # 存入数据库
     task.rewritten_transcript = rewritten
@@ -275,6 +305,71 @@ async def extract_book_info(task_id: int, db: Session) -> dict:
         "confidence": float(result.get("confidence", 0.0)),
         "evidence": result.get("evidence", ""),
     }
+
+
+# ============== 对标卡片标题两行拆分 ==============
+
+SYSTEM_PROMPT_TITLE_SPLIT = """你是中文短视频的封面标题排版师。把给定的视频标题/主题拆成上下两行，用于竖版成片顶部的双色大标题。
+
+排版规则:
+- 第一行是铺垫短行（白色展示），4~8 个字，交代对象或背景
+- 第二行是点题长行（金色展示），6~11 个字，给出核心观点/悬念/情绪钩子，必须比第一行更有分量
+- 两行连读语义通顺，有递进或转折的节奏感
+- 不加书名号以外的标点，不用英文
+- 若原标题过长，允许提炼改写，但不能偏离原意
+
+输出格式: 纯 JSON
+{"line1": "第一行文本", "line2": "第二行文本"}
+不要输出 markdown、代码围栏、解释或任何非 JSON 内容。"""
+
+
+async def split_title_two_lines(title: str, book_title: str = "", book_author: str = "") -> dict:
+    """
+    把标题拆成对标卡片版式的两行：白色铺垫短行 + 金色点题长行。
+
+    Args:
+        title: 原始标题/主题句
+        book_title: 书名（可选，辅助上下文）
+        book_author: 作者（可选）
+
+    Returns:
+        {"line1": str, "line2": str}
+    """
+    import json
+
+    fallback = {"line1": "", "line2": title.strip()}
+    if not title.strip():
+        return {"line1": "", "line2": ""}
+
+    context = ""
+    if book_title:
+        context = f"\n关联书籍:《{book_title}》{book_author}"
+
+    user_prompt = f"视频标题:{title.strip()}{context}\n请拆成两行并输出纯 JSON。"
+
+    print(f"[llm_service] split_title_two_lines: {title[:40]}")
+
+    try:
+        response = await client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT_TITLE_SPLIT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=256,
+            response_format={"type": "json_object"}
+        )
+        raw = response.choices[0].message.content or "{}"
+        result = json.loads(raw)
+        line1 = (result.get("line1") or "").strip()
+        line2 = (result.get("line2") or "").strip()
+        if not line2:
+            return fallback
+        return {"line1": line1, "line2": line2}
+    except Exception as e:
+        print(f"[llm_service] split_title_two_lines 失败: {e}，回退单行")
+        return fallback
 
 
 # ============== 智能配音拆段（LLM 语义切段）==============

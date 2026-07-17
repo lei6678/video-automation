@@ -22,6 +22,7 @@ class Task(Base):
     book_author = Column(String, nullable=True)
     video_title = Column(String, nullable=True)      # AI 生成的爆款标题（百货/流量赛道）
     content_mode = Column(String, default="book")     # "book"=图书赛道 | "general"=百货与流量赛道
+    visual_context = Column(Text, nullable=True)       # 配图视觉档案（LLM 提取的主角特征，确保人物一致性）
     error_msg = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

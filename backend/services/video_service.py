@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Optional
 
 # ============== 系统级 GBK 修复 ==============
@@ -89,6 +90,19 @@ def _find_handwriting_font() -> str:
         if os.path.exists(path):
             return path.replace(":", "\\:")
     return _find_chinese_font()  # 兜底用雅黑
+
+
+def _find_title_font() -> str:
+    """
+    对标卡片模式标题/字幕字体：优先项目内思源宋体 Heavy（fonts/XianKai_Title.otf），
+    缺失时降级楷体系。返回 FFmpeg drawtext 转义路径。
+    """
+    project_font = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "fonts", "XianKai_Title.otf")
+    )
+    if os.path.exists(project_font):
+        return project_font.replace("\\", "/").replace(":", "\\:")
+    return _find_handwriting_font()
 
 
 def get_audio_duration(file_path: str) -> float:
@@ -268,6 +282,156 @@ def split_into_word_groups(
     return groups_result
 
 
+# ============== v8 字幕辅助函数（自然断句 + 智能换行）==============
+
+def _count_cjk(text: str) -> int:
+    """统计字符串中的 CJK 字符数（中文/日文假名）。"""
+    count = 0
+    for ch in text:
+        cp = ord(ch)
+        if (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or
+            0x20000 <= cp <= 0x2A6DF or 0x3040 <= cp <= 0x30FF or
+            0xF900 <= cp <= 0xFAFF):
+            count += 1
+        elif cp > 127:  # 其他宽字符也算一个 CJK 单位
+            count += 1
+    return count
+
+
+def _split_natural_phrases(text: str, max_chars: int = 14) -> list[str]:
+    """在逗号、分号、句号、问号、感叹号等天然停顿处拆分文本。
+
+    返回按标点拆分的短语列表，每个短语 ≈ 7-14 个 CJK 字符，
+    过长段在中间标点处再拆分，保证每段是一个完整的语意单元。
+    """
+    if not text.strip():
+        return [text]
+
+    # 第一轮：按强标点切分（逗号、分号、句号、冒号、省略号等）
+    raw_parts = []
+    current = ""
+    break_points = set("，,。！？；;、：:…\n")
+    # 英文标点当作弱断点（前后的中文上下文可能是同一句话）
+    soft_breaks = set(".!?;,")
+
+    for ch in text:
+        current += ch
+        if ch in break_points:
+            raw_parts.append(current)
+            current = ""
+    if current.strip():
+        raw_parts.append(current)
+
+    # 第二轮：合并过短的碎片（< 4 个 CJK 字符的合并到相邻段）
+    merged = []
+    for part in raw_parts:
+        cjk = _count_cjk(part)
+        if cjk < 4 and merged:
+            merged[-1] = merged[-1] + part
+        else:
+            merged.append(part)
+
+    # 第三轮：拆分过长的段（递归对拆，直到每段 ≤ max_chars）
+    # 修复两个旧缺陷：
+    #   1) 只在"中点窗口"内找标点，窗口外有标点也会落到 14 字硬切，斩断词语
+    #   2) 无标点时在第 max_chars 字硬切，产生 14+2 这种失衡断句
+    def _split_long(part: str) -> list[str]:
+        if _count_cjk(part) <= max_chars:
+            return [part]
+        mid = len(part) // 2
+        # 收集全部可断标点位置，取离中点最近者
+        candidates = [j + 1 for j, ch in enumerate(part[:-1])
+                      if ch in "，,。！？；;、：:… \t"]
+        if candidates:
+            best = min(candidates, key=lambda p: abs(p - mid))
+        else:
+            # 无任何标点 → 按 CJK 字数对半拆，两段均衡
+            cjk_half = max(1, _count_cjk(part) // 2)
+            cnt = 0
+            best = mid
+            for j, ch in enumerate(part):
+                if _count_cjk(ch) > 0:
+                    cnt += 1
+                    if cnt >= cjk_half:
+                        best = j + 1
+                        break
+        if not (0 < best < len(part)):
+            return [part]
+        return _split_long(part[:best]) + _split_long(part[best:])
+
+    result = []
+    for part in merged:
+        result.extend(_split_long(part))
+
+    # 第四轮：拆分后重新产生的孤儿碎片（<4 字）并回前段（不超过单屏上限时）
+    final = []
+    for r in result:
+        if final and _count_cjk(r) < 4 and _count_cjk(final[-1]) + _count_cjk(r) <= max_chars:
+            final[-1] = final[-1] + r
+        else:
+            final.append(r)
+
+    return [r for r in final if r.strip()]
+
+
+def _wrap_phrase(phrase: str, max_cjk_per_line: int = 14) -> list[str]:
+    """将一个短语拆分为 1-2 行，每行 ≤ max_cjk_per_line 个 CJK 字符。
+
+    只在标点或空格处断行，不做暴力切分。
+    """
+    cjk = _count_cjk(phrase)
+    if cjk <= max_cjk_per_line:
+        return [phrase]
+
+    # 在中点附近找断行位置
+    mid = len(phrase) // 2
+    best = mid
+    for bp in "，,。；;、 \t":
+        pos = phrase.find(bp, max(0, mid - len(phrase) // 4), min(len(phrase), mid + len(phrase) // 4))
+        if pos != -1:
+            best = pos + 1
+            break
+    if best == mid or best >= len(phrase) or best <= 2:
+        # 找不到自然断点，保留原样
+        return [phrase]
+    return [phrase[:best], phrase[best:]]
+
+
+_SUBTITLE_PUNCT = "，,。．.！!？?；;、：:…—～~·“”‘’\"'（）()《》〈〉【】[]"
+
+
+def _strip_subtitle_punct(text: str) -> str:
+    """字幕上屏前去标点：断句仍按标点计算，仅显示层擦除。
+
+    首尾标点直接删除，中间标点替换为空格（保留语气停顿的视觉间隔）。
+    """
+    t = text.strip().strip(_SUBTITLE_PUNCT)
+    cleaned = "".join(" " if ch in _SUBTITLE_PUNCT else ch for ch in t)
+    return " ".join(cleaned.split())
+
+
+def _split_title_lines(title: str, max_chars: int = 16) -> list[str]:
+    """将视频标题拆分为 1-2 行，在空格或标点处自然断行。
+
+    单行 ≤ max_chars 个字符。
+    """
+    cjk = _count_cjk(title)
+    if cjk <= max_chars:
+        return [title]
+
+    # 在中点附近找空格或标点
+    mid = len(title) // 2
+    best = mid
+    for bp in " 　，,。；;、-—":
+        pos = title.find(bp, max(0, mid - len(title) // 4), min(len(title), mid + len(title) // 4))
+        if pos != -1:
+            best = pos + 1
+            break
+    if best == mid or best >= len(title) or best <= 2:
+        return [title]
+    return [title[:best], title[best:].lstrip()]
+
+
 # ============== 视频片段生成（v4 Ken Burns + 字随音动）==============
 
 def create_ken_burns_clip(
@@ -326,37 +490,34 @@ def create_ken_burns_clip(
     # ---- 构建 drawtext 滤镜链 ----
     drawtext_filters = []
 
-    # --- 主字幕（v4 字随音动：词级切分 + enable 时间窗口）---
+    # --- 主字幕（v8 自然断句：在逗号/分号/句号处切分，每段 ~10-14 字）---
     if subtitle_text.strip():
-        word_groups = split_into_word_groups(
-            subtitle_text.strip(),
-            group_min=8,
-            group_max=12,
-            duration_sec=duration_sec,
-        )
-        total_groups = len(word_groups)
+        # 按天然标点停顿拆成短语，每个短语独立显示，说完再切下一个
+        phrases = _split_natural_phrases(subtitle_text.strip(), max_chars=14)
+        total_phrases = len(phrases)
 
-        for g_idx, group in enumerate(word_groups):
-            g_text = group["text"]
-            g_start = group["start"]
-            g_end = group["end"]
+        # 统计每个短语的 CJK 字符数，用于按比例分配时长
+        phrase_cjk_counts = [_count_cjk(p) for p in phrases]
+        total_cjk = sum(phrase_cjk_counts)
 
-            # 组内智能换行（最大 22 字符/行）
-            max_chars_per_line = 22
-            if len(g_text) <= max_chars_per_line:
-                lines = [g_text]
+        time_start = 0.0
+        for p_idx, phrase in enumerate(phrases):
+            p_cjk = phrase_cjk_counts[p_idx]
+            # 按 CJK 字符数比例分配该短语的显示时长
+            phrase_dur = (p_cjk / total_cjk) * duration_sec if total_cjk > 0 else duration_sec / total_phrases
+            # 确保每个短语最少显示 0.8 秒
+            phrase_dur = max(phrase_dur, 0.8)
+            # 最后一段吃掉剩余时间，避免累积误差
+            if p_idx == total_phrases - 1:
+                phrase_end = duration_sec
             else:
-                mid = len(g_text) // 2
-                break_chars = "，,。！？；;、"
-                best = mid
-                for bp in break_chars:
-                    pos = g_text.find(bp, max(0, mid - 8), min(len(g_text), mid + 8))
-                    if pos != -1:
-                        best = pos + 1
-                        break
-                if best == mid:
-                    best = max_chars_per_line
-                lines = [g_text[:best], g_text[best:]]
+                phrase_end = time_start + phrase_dur
+                # 防止超出总时长
+                if phrase_end > duration_sec - 0.3:
+                    phrase_end = duration_sec
+
+            # 短语内自动换行（单行 ≤ 14 个 CJK 字符）
+            lines = _wrap_phrase(phrase, max_cjk_per_line=14)
 
             for li, line in enumerate(lines):
                 if not line.strip():
@@ -369,8 +530,8 @@ def create_ken_burns_clip(
                          .replace("{", "\\{")
                          .replace("}", "\\}")
                 )
-                # v4: y = height*0.6（距底部 40%），fontcolor=#FFCC00
-                y_pos = int(height * 0.6) + li * (subtitle_font_size + 38)
+                # 字幕放在画面下半部分，居中
+                y_pos = int(height * 0.55) + li * (subtitle_font_size + 14)
                 dt = (
                     f"drawtext=fontfile='{subtitle_font_file}':"
                     f"text='{escaped}':"
@@ -380,36 +541,47 @@ def create_ken_burns_clip(
                     f"y={y_pos}:"
                     f"shadowcolor=black@0.7:shadowx=3:shadowy=3:"
                     f"bordercolor=black@0.5:borderw=4:"
-                    f"enable='between(t,{g_start},{g_end})'"
+                    f"enable='between(t,{time_start:.3f},{phrase_end:.3f})'"
                 )
                 drawtext_filters.append(dt)
 
+            time_start = phrase_end
+
         print(
-            f"[video:clip] 字幕: {total_groups} 组词级字幕, "
-            f"每段 {group['start']:.1f}s→{group['end']:.1f}s"
-            if total_groups <= 3
-            else f"[video:clip] 字幕: {total_groups} 组词级字幕"
+            f"[video:clip] 字幕: {total_phrases} 段自然断句, "
+            f"每段 {phrase_cjk_counts[0] if phrase_cjk_counts else 0}~{phrase_cjk_counts[-1] if phrase_cjk_counts else 0} 字"
+            if total_phrases <= 3
+            else f"[video:clip] 字幕: {total_phrases} 段自然断句"
         )
 
-    # --- 左上角水印 ---
+    # --- 顶部居中标题（v8：渐变黑条 + 大号白色居中标题 + 自动分行）---
     if watermark_text.strip():
-        escaped_wm = (
-            watermark_text.replace("\\", "\\\\")
-                          .replace(":", "\\:")
-                          .replace("'", "\\'")
-                          .replace("%", "\\%")
-                          .replace("{", "\\{")
-                          .replace("}", "\\}")
-        )
-        dt_wm = (
-            f"drawtext=fontfile='{subtitle_font_file}':"
-            f"text='{escaped_wm}':"
-            f"fontcolor=white@0.65:"
-            f"fontsize=26:"
-            f"x=40:y=40:"
-            f"shadowcolor=black@0.5:shadowx=2:shadowy=2"
-        )
-        drawtext_filters.append(dt_wm)
+        scaled_fontsize = max(36, int(subtitle_font_size * 0.75))
+        title_lines = _split_title_lines(watermark_text, max_chars=16)
+        for ti, tline in enumerate(title_lines):
+            escaped_wm = (
+                tline.replace("\\", "\\\\")
+                     .replace(":", "\\:")
+                     .replace("'", "\\'")
+                     .replace("%", "\\%")
+                     .replace("{", "\\{")
+                     .replace("}", "\\}")
+            )
+            y_pos = 55 + ti * (scaled_fontsize + 12)
+            dt_wm = (
+                f"drawtext=fontfile='{subtitle_font_file}':"
+                f"text='{escaped_wm}':"
+                f"fontcolor=white@0.92:"
+                f"fontsize={scaled_fontsize}:"
+                f"x=(w-text_w)/2:"
+                f"y={y_pos}:"
+                f"shadowcolor=black@0.6:shadowx=2:shadowy=2"
+            )
+            drawtext_filters.append(dt_wm)
+
+        # 顶部半透明黑条：120px 高，确保标题在任何背景上都清晰可读
+        gradient_bar = f"drawbox=x=0:y=0:w=iw:h=120:color=black@0.55:t=fill"
+        drawtext_filters.insert(0, gradient_bar)
 
     # --- 底部声明 ---
     if bottom_disclaimer.strip():
@@ -1509,6 +1681,190 @@ def export_jianying_draft(
         return None
 
 
+# ============== 自动发布到剪映草稿箱（剪映专业版 / JianyingPro）==============
+
+def _find_jianyingpro_meta_path() -> Optional[str]:
+    """找到剪映专业版的 root_meta_info.json 路径。"""
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    candidates = [
+        os.path.join(local_appdata, "JianyingPro", "User Data", "Projects", "com.lveditor.draft", "root_meta_info.json"),
+        os.path.join(local_appdata, "CapCut", "User Data", "Projects", "com.lveditor.draft", "root_meta_info.json"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def auto_publish_to_jianying(
+    task_id: int,
+    task_dir: str,
+    image_paths: list[str],
+    audio_path: str,
+    draft_name: str = "",
+) -> bool:
+    """
+    成片后自动将草稿发送到剪映桌面版本地草稿箱（适配剪映专业版 JianyingPro）。
+
+    工作原理：
+    1. 读取剪映的 root_meta_info.json，找到 draft_root_path（草稿根目录）
+    2. 在 draft_root_path 下创建以视频标题命名的子文件夹
+    3. 将 task_dir 下已有的 draft_content.json 复制过去
+    4. 复制所有配图、音频素材
+    5. 在 root_meta_info.json 中注册新草稿
+    6. 打开剪映桌面版即可在草稿箱看到
+
+    Returns:
+        是否成功
+    """
+    meta_path = _find_jianyingpro_meta_path()
+    if not meta_path:
+        print("[jianying:publish] 未找到剪映专业版 root_meta_info.json，跳过自动发布")
+        return False
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception as e:
+        print(f"[jianying:publish] 读取 root_meta_info.json 失败: {e}")
+        return False
+
+    # 从已有草稿中提取 draft_root_path
+    all_drafts = meta.get("all_draft_store", [])
+    draft_root = ""
+    for d in all_drafts:
+        root = d.get("draft_root_path", "")
+        if root and os.path.exists(root):
+            draft_root = root
+            break
+    if not draft_root:
+        # 兜底：用 Documents 目录
+        draft_root = os.path.join(os.path.expanduser("~"), "Documents", "JianyingPro Drafts")
+        print(f"[jianying:publish] 未找到 draft_root_path，使用兜底: {draft_root}")
+
+    # 草稿文件夹名（清理非法字符）
+    folder_name = draft_name.strip() or f"VideoAuto_Task_{task_id}"
+    for bad in '<>:"/\\|?*':
+        folder_name = folder_name.replace(bad, "_")
+
+    draft_dest = os.path.join(draft_root, folder_name)
+    os.makedirs(draft_dest, exist_ok=True)
+
+    # --- 复制 draft_content.json ---
+    existing_draft_json = os.path.join(task_dir, "draft_content.json")
+    if not os.path.exists(existing_draft_json):
+        print("[jianying:publish] task_dir 中无 draft_content.json，跳过")
+        return False
+
+    import shutil
+    dest_json = os.path.join(draft_dest, "draft_content.json")
+    shutil.copy2(existing_draft_json, dest_json)
+
+    # --- 复制素材 ---
+    images_dest_dir = os.path.join(draft_dest, "images")
+    os.makedirs(images_dest_dir, exist_ok=True)
+    for img_path in image_paths:
+        if not img_path or not os.path.exists(img_path):
+            continue
+        fname = os.path.basename(img_path)
+        try:
+            shutil.copy2(img_path, os.path.join(images_dest_dir, fname))
+        except Exception as e:
+            print(f"[jianying:publish] 复制图片失败 {img_path}: {e}")
+
+    # 音频
+    if audio_path and os.path.exists(audio_path):
+        audio_fname = os.path.basename(audio_path)
+        try:
+            shutil.copy2(audio_path, os.path.join(draft_dest, audio_fname))
+        except Exception as e:
+            print(f"[jianying:publish] 复制音频失败: {e}")
+
+    # 封面图（取第一张配图）
+    cover_path = image_paths[0] if image_paths else None
+    cover_dest = os.path.join(draft_dest, "draft_cover.jpg")
+    if cover_path and os.path.exists(cover_path):
+        try:
+            shutil.copy2(cover_path, cover_dest)
+        except Exception:
+            # 封面复制失败不阻塞
+            pass
+
+    # --- 计算总时长 ---
+    try:
+        from mutagen.mp3 import MP3
+        audio_total = MP3(audio_path).info.length if audio_path and os.path.exists(audio_path) else 30.0
+    except Exception:
+        audio_total = 30.0
+
+    # --- 注册到 root_meta_info.json ---
+    draft_fold = draft_dest.replace("\\", "/")
+    draft_json_file = (draft_fold + "/draft_content.json").replace("\\", "/")
+    draft_cover = (draft_fold + "/draft_cover.jpg").replace("\\", "/")
+    draft_id = f"VideoAuto-{task_id}-{int(time.time())}"
+
+    new_entry = {
+        "cloud_draft_cover": False,
+        "cloud_draft_sync": False,
+        "draft_cloud_last_action_download": False,
+        "draft_cloud_purchase_info": "",
+        "draft_cloud_template_id": "",
+        "draft_cloud_tutorial_info": "",
+        "draft_cloud_videocut_purchase_info": "",
+        "draft_cover": draft_cover,
+        "draft_fold_path": draft_fold,
+        "draft_id": draft_id,
+        "draft_is_ai_shorts": False,
+        "draft_is_cloud_temp_draft": False,
+        "draft_is_invisible": False,
+        "draft_is_web_article_video": False,
+        "draft_json_file": draft_json_file,
+        "draft_name": folder_name,
+        "draft_new_version": "",
+        "draft_root_path": draft_root,
+        "draft_timeline_materials_size": 0,
+        "draft_type": "",
+        "draft_web_article_video_enter_from": "",
+        "streaming_edit_draft_ready": True,
+        "tm_draft_cloud_completed": "",
+        "tm_draft_cloud_entry_id": -1,
+        "tm_draft_cloud_modified": 0,
+        "tm_draft_cloud_parent_entry_id": -1,
+        "tm_draft_cloud_space_id": -1,
+        "tm_draft_cloud_user_id": -1,
+        "tm_draft_create": int(time.time() * 1000000),
+        "tm_draft_modified": int(time.time() * 1000000),
+        "tm_draft_removed": 0,
+        "tm_duration": int(audio_total * 1_000_000),
+    }
+
+    # 检查是否已有同 task_id 的旧条目，有则替换
+    replaced = False
+    for i, d in enumerate(all_drafts):
+        if str(task_id) in d.get("draft_name", "") or draft_id == d.get("draft_id", ""):
+            all_drafts[i] = new_entry
+            replaced = True
+            break
+    if not replaced:
+        all_drafts.insert(0, new_entry)
+
+    meta["all_draft_store"] = all_drafts
+
+    # 写回（先备份）
+    backup_path = meta_path + ".bak"
+    try:
+        shutil.copy2(meta_path, backup_path)
+    except Exception:
+        pass
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    print(f"[jianying:publish] ✅ 已自动发送到剪映草稿箱: {draft_dest}")
+    print(f"[jianying:publish]    素材: {len(image_paths)} 图 + 1 音频 → {folder_name}")
+    print(f"[jianying:publish]    请打开剪映桌面版 → 「草稿」页面即可看到")
+    return True
+
 # ============== 主入口：v3 1:1 绑定合成 ==============
 
 async def compose_final_video(
@@ -2464,6 +2820,354 @@ async def compose_final_video_card_v6(
     }
 
 
+# ============== v8 对标卡片模式：深藏青底 + 8:9 满宽大图 + 双色标题 ==============
+
+async def compose_final_video_card_bench(
+    task_id: int,
+    db,
+    sentences: list[str],
+    seg_durations: list[float],
+    image_paths: list[str],
+    task_dir: str,
+    final_audio: str,
+    title_line1: str = "",     # 第一行（白色，铺垫短行）
+    title_line2: str = "",     # 第二行（金色，点题长行）
+    slogan: str = "- 品读传奇人生 -",   # 图片下方静态金色标语
+    subtitle_line: str = "图片由AI生成与网络下载\\n科普视频 无不良引导",  # 底部低对比免责小字
+    width: int = 1080,
+    height: int = 1920,
+    fps: int = 30,
+) -> dict:
+    """
+    v8 对标卡片版式（像素级复刻对标成片，参数来自 1080×2340 截图实测）：
+
+    ┌──────────────────────┐ 深藏青 #071730 背景
+    │   标题行1（白 #FBFBF7）│ y=150, 字号 80
+    │   标题行2（金 #C9B38C）│ y=259, 行距 29
+    │ ──── 4px 浅白细线 ──── │ y=373
+    │▓▓▓ 8:9 大图满宽出血 ▓▓│ y=377, 1080×1214, Ken Burns
+    │▓▓ 口播字幕（白，描边）▓│ 字幕底边距图片底边 258px（实测）
+    │ ──── 4px 浅白细线 ──── │ y=1591
+    │  静态标语（金 #D9BB7A）│ y=1651, 字号 68, 单行居中
+    │  免责两行小字 #212C40  │ y=1774/1810, 字号 28, 低对比
+    └──────────────────────┘
+    架构沿用 v6 骨肉分离：纯画面片段 → 分批全局 filter_complex。
+    """
+    # ---- 实测版式常量（对标截图像素级测量值）----
+    BG_COLOR = "#071730"        # 深藏青背景
+    TITLE_WHITE = "#FBFBF7"     # 标题行1 米白
+    TITLE_GOLD = "#C9B38C"      # 标题行2 金
+    SLOGAN_GOLD = "#D9BB7A"     # 静态标语金
+    SUB_WHITE = "#FEFEFC"       # 口播字幕白（实测 254,254,252）
+    DISC_COLOR = "#212C40"      # 免责小字（实测 33,44,64，比背景略亮的低对比蓝灰）
+    LINE_COLOR = "0xE8E4D4"     # 图片上下浅白细线（实测暖白）
+    TITLE_FONT_SIZE = 80        # 实测字高 ~79px
+    SUB_FONT_SIZE = 64          # 口播字幕（实测字高 ~70px，留描边余量）
+    SLOGAN_FONT_SIZE = 68       # 静态标语（实测字高 ~72px）
+    DISC_FONT_SIZE = 28         # 免责小字（实测字高 ~32px）
+    TITLE1_Y = 150              # 标题行1 顶部
+    TITLE2_Y = TITLE1_Y + TITLE_FONT_SIZE + 29   # 259，实测行距 29
+    IMG_Y = TITLE2_Y + TITLE_FONT_SIZE + 38      # 377，实测标题→图 38px
+    IMG_W, IMG_H = width, 1214  # 8:9 满宽出血（实测 1080×1209；理论 1215 取偶数 1214，yuv420p 要求偶数）
+    LINE_H = 4                  # 细线厚度（实测 3~4px）
+    SUB_Y = IMG_Y + IMG_H - 258 - SUB_FONT_SIZE  # 1269，字幕叠在图内，底边距图底 258px（实测）
+    SLOGAN_Y = IMG_Y + IMG_H + LINE_H + 56       # 1651，实测细线→标语 56px
+    DISC1_Y = 1774              # 免责行1（按对标底边距等比锚定）
+    DISC_PITCH = 36             # 免责行距（实测节距 35）
+
+    def _calc_max_zoom(dur: float) -> float:
+        if dur < 5:     return 1.10
+        elif dur < 10:  return 1.14
+        else:           return 1.16
+
+    clips_dir = os.path.join(task_dir, "video_clips_card_bench")
+    os.makedirs(clips_dir, exist_ok=True)
+
+    # =================================================================
+    # Step 1: 逐段生成纯画面 1080×1215 片段（Ken Burns）
+    # =================================================================
+    pure_clip_paths = []
+    success_count = 0
+    placeholder_count = 0
+
+    for i, (sentence, dur) in enumerate(zip(sentences, seg_durations)):
+        if dur < 0.3:
+            continue
+
+        img_path = image_paths[i] if i < len(image_paths) else None
+        if not img_path or not os.path.exists(img_path):
+            from PIL import Image as PILImage
+            ph_img = os.path.join(clips_dir, f"_ph_{i:03d}.png")
+            dark = PILImage.new("RGB", (IMG_W, IMG_H), (10, 16, 28))
+            dark.save(ph_img, "PNG")
+            img_path = ph_img
+
+        clip_path = os.path.join(clips_dir, f"pure_{i:03d}.mp4")
+        ok = create_card_pure_clip(
+            image_path=img_path,
+            output_path=clip_path,
+            duration_sec=dur,
+            fps=fps,
+            out_w=IMG_W,
+            out_h=IMG_H,
+            max_zoom=_calc_max_zoom(dur),
+        )
+
+        if ok:
+            pure_clip_paths.append(clip_path)
+            success_count += 1
+        else:
+            print(f"[video:bench] pure clip {i + 1}/{len(sentences)} FAIL → 占位 {dur:.1f}s")
+            ph_path = os.path.join(clips_dir, f"pure_{i:03d}_ph.mp4")
+            if create_silent_placeholder_clip(ph_path, dur, IMG_W, IMG_H, fps,
+                                              label=f"bench seg{i}"):
+                pure_clip_paths.append(ph_path)
+                placeholder_count += 1
+
+        if (i + 1) % 15 == 0 or i == len(sentences) - 1:
+            print(f"[video:bench] pure clip {i + 1}/{len(sentences)} OK {success_count}")
+
+    if not pure_clip_paths:
+        return {"error": "所有纯画面片段生成失败", "segment_count": 0}
+
+    total_duration = sum(d for d in seg_durations if d >= 0.3)
+
+    # =================================================================
+    # Step 2: 分批全局合成（背景 + 细线 + 标题 + 字幕）
+    # =================================================================
+    BATCH_SIZE = 12
+    title_font = _find_title_font()
+
+    def _esc(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\")
+                .replace(":", "\\:")
+                .replace("'", "\\'")
+                .replace("%", "\\%")
+                .replace("{", "\\{")
+                .replace("}", "\\}")
+        )
+
+    # ---- 静态图层（每批相同）：细线 + 双色标题 + 金色标语 + 免责小字 ----
+    static_filters = [
+        f"drawbox=x=0:y={IMG_Y - LINE_H}:w={width}:h={LINE_H}:color={LINE_COLOR}@0.95:t=fill",
+        f"drawbox=x=0:y={IMG_Y + IMG_H}:w={width}:h={LINE_H}:color={LINE_COLOR}@0.95:t=fill",
+    ]
+    if slogan.strip():
+        static_filters.append(
+            f"drawtext=fontfile='{title_font}':"
+            f"text='{_esc(slogan.strip())}':"
+            f"fontcolor={SLOGAN_GOLD}:fontsize={SLOGAN_FONT_SIZE}:"
+            f"x=(w-text_w)/2:y={SLOGAN_Y}"
+        )
+    if subtitle_line.strip():
+        # 兼容字面 \n 与真实换行两种传参
+        disc_lines = subtitle_line.replace("\\n", "\n").split("\n")
+        for dli, dline in enumerate(disc_lines[:2]):
+            if not dline.strip():
+                continue
+            static_filters.append(
+                f"drawtext=fontfile='{title_font}':"
+                f"text='{_esc(dline.strip())}':"
+                f"fontcolor={DISC_COLOR}:fontsize={DISC_FONT_SIZE}:"
+                f"x=(w-text_w)/2:y={DISC1_Y + dli * DISC_PITCH}"
+            )
+    if title_line1.strip() and title_line2.strip():
+        static_filters.append(
+            f"drawtext=fontfile='{title_font}':"
+            f"text='{_esc(title_line1.strip())}':"
+            f"fontcolor={TITLE_WHITE}:fontsize={TITLE_FONT_SIZE}:"
+            f"x=(w-text_w)/2:y={TITLE1_Y}"
+        )
+        static_filters.append(
+            f"drawtext=fontfile='{title_font}':"
+            f"text='{_esc(title_line2.strip())}':"
+            f"fontcolor={TITLE_GOLD}:fontsize={TITLE_FONT_SIZE}:"
+            f"x=(w-text_w)/2:y={TITLE2_Y}"
+        )
+    elif title_line1.strip() or title_line2.strip():
+        # 只有一行时：金色居中于标题区
+        single = (title_line1 or title_line2).strip()
+        single_y = (TITLE1_Y + TITLE2_Y) // 2
+        static_filters.append(
+            f"drawtext=fontfile='{title_font}':"
+            f"text='{_esc(single)}':"
+            f"fontcolor={TITLE_GOLD}:fontsize={TITLE_FONT_SIZE}:"
+            f"x=(w-text_w)/2:y={single_y}"
+        )
+
+    total_batches = (len(sentences) + BATCH_SIZE - 1) // BATCH_SIZE
+    batch_videos = []
+
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * BATCH_SIZE
+        batch_end = min(batch_start + BATCH_SIZE, len(sentences))
+        batch_sentences = sentences[batch_start:batch_end]
+        batch_durations = seg_durations[batch_start:batch_end]
+        batch_pure = [pure_clip_paths[i] for i in range(batch_start, batch_end)
+                      if i < len(pure_clip_paths)]
+
+        if not batch_pure:
+            print(f"[video:bench] Batch {batch_idx+1}/{total_batches} 无可用纯画面片段，跳过")
+            continue
+
+        batch_middle = os.path.join(clips_dir, f"middle_batch_{batch_start:03d}.mp4")
+        if not concat_clips(batch_pure, batch_middle):
+            print(f"[video:bench] Batch {batch_idx+1}/{total_batches} 纯画面拼接失败，跳过")
+            continue
+
+        batch_dur = sum(d for d in batch_durations if d >= 0.3)
+
+        # ---- 口播字幕（v8 自然断句：标点停顿处切分，按字数比例分配时长）----
+        dt_list = list(static_filters)
+        batch_cumulative = 0.0
+        for sentence, dur in zip(batch_sentences, batch_durations):
+            if dur < 0.3 or not sentence.strip():
+                batch_cumulative += dur
+                continue
+
+            phrases = _split_natural_phrases(sentence.strip(), max_chars=14)
+            phrase_cjk_counts = [_count_cjk(p) for p in phrases]
+            total_cjk = sum(phrase_cjk_counts)
+
+            time_start = 0.0
+            for p_idx, phrase in enumerate(phrases):
+                p_cjk = phrase_cjk_counts[p_idx]
+                # 按 CJK 字符数比例分配显示时长，最少 0.8s，末段吃掉剩余时间
+                phrase_dur = (p_cjk / total_cjk) * dur if total_cjk > 0 else dur / len(phrases)
+                phrase_dur = max(phrase_dur, 0.8)
+                if p_idx == len(phrases) - 1:
+                    phrase_end = dur
+                else:
+                    phrase_end = time_start + phrase_dur
+                    if phrase_end > dur - 0.3:
+                        phrase_end = dur
+
+                g_start = batch_cumulative + time_start
+                g_end = batch_cumulative + phrase_end
+                display_text = _strip_subtitle_punct(phrase)
+                if display_text:
+                    dt_list.append(
+                        f"drawtext=fontfile='{title_font}':"
+                        f"text='{_esc(display_text)}':"
+                        f"fontcolor={SUB_WHITE}:fontsize={SUB_FONT_SIZE}:"
+                        f"x=(w-text_w)/2:y={SUB_Y}:"
+                        f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+                        f"bordercolor=black@0.5:borderw=4:"
+                        f"enable='between(t,{g_start:.3f},{g_end:.3f})'"
+                    )
+                time_start = phrase_end
+                if time_start >= dur:
+                    break
+            batch_cumulative += dur
+
+        # ---- filter_complex：藏青底 → overlay 大图 → 细线/标题/字幕 ----
+        filter_parts = [
+            f"color=c={BG_COLOR}:s={width}x{height}:d={batch_dur}:r={fps},format=yuv420p[bg]",
+        ]
+        chain = f"[bg][0:v]overlay=0:{IMG_Y}:shortest=1"
+        if dt_list:
+            chain += "," + ",".join(dt_list)
+        chain += ",format=yuv420p[outv]"
+        filter_parts.append(chain)
+        filter_complex = ";".join(filter_parts)
+
+        filter_script_path = os.path.join(clips_dir, f"filter_batch_{batch_start:03d}.txt")
+        with open(filter_script_path, "w", encoding="utf-8") as f:
+            f.write(filter_complex)
+
+        batch_output = os.path.join(clips_dir, f"batch_{batch_start:03d}_bench.mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", batch_middle,
+            "-filter_complex_script", filter_script_path,
+            "-map", "[outv]",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            batch_output,
+        ]
+
+        print(
+            f"[video:bench] Batch {batch_idx+1}/{total_batches}: "
+            f"段 {batch_start}-{batch_end-1}, {batch_dur:.1f}s, "
+            f"{len(dt_list)} 滤镜项"
+        )
+
+        try:
+            result = _run_ffmpeg(cmd, timeout=300, description=f"card bench batch {batch_idx}")
+            for tmp in (filter_script_path, batch_middle):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+            if result.returncode != 0:
+                stderr_tail = (result.stderr or "")[-500:]
+                print(f"[video:bench] Batch {batch_idx+1} FFmpeg 错误: {stderr_tail}")
+                continue
+            if os.path.exists(batch_output) and os.path.getsize(batch_output) > 1000:
+                batch_videos.append(batch_output)
+            else:
+                print(f"[video:bench] Batch {batch_idx+1} 输出文件异常")
+        except Exception as e:
+            for tmp in (filter_script_path, batch_middle):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+            print(f"[video:bench] Batch {batch_idx+1} 异常: {e}")
+            continue
+
+    if not batch_videos:
+        return {"error": "所有批次复合均失败", "segment_count": success_count}
+
+    # ---- 拼接所有批次 ----
+    concat_path = os.path.join(task_dir, "concat_bench.mp4")
+    if not concat_clips(batch_videos, concat_path):
+        return {"error": "批次拼接失败", "segment_count": success_count}
+
+    for bv in batch_videos:
+        try:
+            os.remove(bv)
+        except Exception:
+            pass
+
+    # ---- 混入音轨 ----
+    final_path = os.path.join(task_dir, "final_bench_1080x1920.mp4")
+    if os.path.exists(final_audio):
+        if not mux_audio(concat_path, final_audio, final_path):
+            return {"error": "音轨混流失败", "segment_count": success_count}
+        try:
+            os.remove(concat_path)
+        except Exception:
+            pass
+    else:
+        final_path = concat_path
+
+    final_duration = get_audio_duration(final_path)
+    final_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
+    if final_size < 1000:
+        return {"error": "输出文件过小或缺失", "segment_count": success_count}
+
+    print(f"[video:bench] >>> 对标卡片成片完成: {final_path}")
+    print(f"[video:bench]    时长: {final_duration:.1f}s, 大小: {final_size / 1024 / 1024:.1f}MB")
+    print(f"[video:bench]    分镜: {success_count}, 占位: {placeholder_count}")
+    print(f"[video:bench]    标题: {title_line1} / {title_line2}")
+
+    return {
+        "video_path": final_path,
+        "video_url": f"/video/{task_id}/final_bench_1080x1920.mp4",
+        "duration_sec": round(final_duration, 1),
+        "size_mb": round(final_size / 1024 / 1024, 1),
+        "segment_count": success_count,
+        "width": width,
+        "height": height,
+    }
+
+
 # ============== 风格预设（v5：多模式裂变）==============
 
 VIDEO_STYLES = {
@@ -2514,5 +3218,13 @@ VIDEO_STYLES = {
         "max_zoom": 1.20,
         "subtitle_color": "#FFCC00",
         "aspect_ratio": "3:4",
+    },
+    "card_bench": {
+        "name": "对标卡片 (深藏青 + 8:9 满宽大图)",
+        "mode": "bench",
+        "font_size": 68,
+        "max_zoom": 1.16,
+        "subtitle_color": "#D9BB7A",
+        "aspect_ratio": "8:9",
     },
 }
