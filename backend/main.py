@@ -2160,6 +2160,24 @@ def _detect_lan_ip() -> str:
     return ""
 
 
+def _auto_open_browser():
+    """延迟 1.5 秒后自动打开浏览器（零门槛使用）。"""
+    import threading
+    import webbrowser
+    import sys as _auto_sys
+
+    def _open():
+        import time
+        time.sleep(1.5)
+        try:
+            webbrowser.open("http://localhost:8000")
+        except Exception:
+            pass  # 静默失败，不影响主程序
+
+    if getattr(_auto_sys, 'frozen', False):
+        threading.Thread(target=_open, daemon=True).start()
+
+
 if __name__ == "__main__":
     import uvicorn
     import sys as _sys
@@ -2176,6 +2194,9 @@ if __name__ == "__main__":
     print(f"  API docs:         http://localhost:8000/docs")
     print("=" * 56)
     print()
+
+    # ★ 自动打开浏览器（方便同事零门槛使用）
+    _auto_open_browser()
 
     _frozen = getattr(_sys, 'frozen', False)
     if _frozen:
