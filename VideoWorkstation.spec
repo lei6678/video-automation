@@ -1,12 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import copy_metadata
 
+datas = [
+    ('frontend/dist', 'frontend/dist'),
+    ('fonts', 'fonts'),
+    ('backend/prompts', 'backend/prompts'),
+]
+datas += copy_metadata('imageio')
 
 a = Analysis(
     ['backend\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('frontend/dist', 'frontend/dist'), ('fonts', 'fonts'), ('backend/prompts', 'backend/prompts')],
-    hiddenimports=['sqlalchemy.ext.asyncio', 'fastapi.middleware', 'uvicorn.logging', 'uvicorn.loops', 'uvicorn.protocols'],
+    datas=datas,
+    hiddenimports=[
+        'sqlalchemy.ext.asyncio',
+        'fastapi.middleware',
+        'uvicorn.logging',
+        'uvicorn.loops',
+        'uvicorn.protocols',
+        'imageio',
+        'imageio.v2',
+        'PIL',
+        'PIL.Image',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
