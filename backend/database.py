@@ -4,13 +4,11 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from _resource import get_data_dir
 
-# 数据库文件路径: backend/data/app.db
-DATABASE_DIR = os.path.join(os.path.dirname(__file__), "data")
+# 数据库文件路径: data/app.db（开发在 backend/data/，打包后在 exe 同目录 data/）
+DATABASE_DIR = get_data_dir()
 DATABASE_PATH = os.path.join(DATABASE_DIR, "app.db")
-
-# 确保目录存在
-os.makedirs(DATABASE_DIR, exist_ok=True)
 
 # 创建数据库引擎
 engine = create_engine(f"sqlite:///{DATABASE_PATH}", connect_args={"check_same_thread": False})

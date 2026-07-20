@@ -17,6 +17,7 @@ import os
 import re
 import time
 from typing import Optional
+from _resource import get_data_dir
 
 import httpx
 from PIL import Image
@@ -77,6 +78,10 @@ STYLE_PROMPT_MAP = {
 # ============== 画面后置防线（防崩坏补丁）==============
 
 SAFETY_SUFFIX = ", highly detailed faces, no duplicate characters, perfect anatomy, masterpiece"
+
+# 句切分结果缓存：避免轮询期间每次请求都重新 split_into_short_sentences()
+# key = (task_id, rewritten_mtime), value = list[str]
+_SENTENCE_CACHE: dict[tuple[int, int], list[str]] = {}
 
 
 # ============== Prompt 安全降级（Fal.ai 内容审查规避）==============
@@ -144,6 +149,95 @@ def _sanitize_prompt(prompt: str) -> str:
             result = result.replace(bad, replacement)
             print(f"[image:sanitize] 替换敏感词: '{bad}' → '{replacement}'")
     return result
+
+
+async def _llm_sanitize_segment(
+    sentence: str,
+    book_title: str = "",
+    book_author: str = "",
+    segment_index: int = 0,
+    total_segments: int = 1,
+    visual_context: str = "",
+) -> str:
+    """用 DeepSeek 将原文的一句话改写为"画面安全但同情绪、同场景"的视觉描述。
+
+    只用于生图 prompt 构建，不影响配音/字幕/rewritten.txt。
+    触发条件：全文级 sanitize 无法匹配的关键词，但 Fal.ai 语义审查拒绝通过
+    （如集中描写死亡、流血、极端贫困、儿童苦难等高度悲剧性段落）。
+
+    改写约束：
+    - 保留场景、人物关系、情绪基调（悲悯→克制伤感，苦难→坚韧）
+    - 去掉具象的血腥/死亡/虐待描写，转为含蓄的肢体语言、环境氛围、象征意象
+    - 仍然是一段约 18 秒口播对应的画面场次描述
+    - 输出纯文本，不附带任何解释
+    """
+
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not deepseek_key:
+        print("[image:llm-sanitize] DEEPSEEK_API_KEY 未设置，跳过")
+        return sentence
+
+    context_block = ""
+    if visual_context.strip():
+        context_block = f"\n故事全局视觉档案:\n{visual_context.strip()}"
+
+    system_msg = (
+        "你是一个影视分镜改写助手。你的任务是把原文中可能触发图像 AI 内容审查的"
+        "具象负面描写（血腥、死亡、暴力、虐待、极端苦难等），改写成一段**含蓄但同情绪、"
+        "同场景的视觉画面描述**。"
+        "\n\n约束："
+        "\n1. 保留原场景、人物位置关系、情绪基调（比如「压抑的悲伤」→「克制地低头沉默」）"
+        "\n2. 用肢体语言、光影、环境氛围、象征意象来代替具象负面描写"
+        "\n3. 输出长度应与原句接近（短句写短，长句可稍长），仅输出改写后的纯文本"
+        "\n4. 不要添加「画面中」「场景：」「图中」等引导词，直接输出描述"
+        "\n5. 不要输出解释或 markdown"
+    )
+    user_msg = (
+        f"原句:\n{sentence}\n\n"
+        f"背景: 全书「{book_title}」，作者 {book_author}，"
+        f"第 {segment_index + 1}/{total_segments} 个分镜。{context_block}\n\n"
+        f"请只输出改写后的画面描述（不含引导词、不含解释）："
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as http:
+            resp = await http.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    "temperature": 0.6,
+                    "max_tokens": 200,
+                },
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                rewritten = data["choices"][0]["message"]["content"].strip()
+                if rewritten and rewritten != sentence:
+                    print(
+                        f"[image:llm-sanitize] 段 {segment_index + 1} LLM 安全改写成功 "
+                        f"({len(sentence)}→{len(rewritten)} 字)"
+                    )
+                    return rewritten
+                else:
+                    print(f"[image:llm-sanitize] 段 {segment_index + 1} LLM 返回与原文相同，跳过")
+                    return sentence
+            else:
+                print(f"[image:llm-sanitize] DeepSeek API 错误 {resp.status_code}: {resp.text[:150]}")
+                return sentence
+    except httpx.TimeoutException:
+        print(f"[image:llm-sanitize] 段 {segment_index + 1} 超时 (15s)，跳过")
+        return sentence
+    except Exception as e:
+        print(f"[image:llm-sanitize] 段 {segment_index + 1} 异常: {type(e).__name__}: {e}")
+        return sentence
 
 
 def _build_generic_prompt(
@@ -268,8 +362,20 @@ def build_single_segment_prompt(
     # 构建视觉档案注入段落（如果有的话）
     visual_block = ""
     if visual_context.strip():
-        visual_block = f"""\n\n配图视觉档案（贯穿全片，所有人物的固定特征必须遵守）：
+        # 检测视觉档案是否涉及年龄跨度
+        import re as _re
+        _has_age_span = bool(_re.search(r'\d+岁[→\-~至到]+\d+岁|年龄|年龄段|年轻时|年轻时|年老时|中年|老年|少年|青年|老去|变老',
+                                        visual_context))
+        _age_note = ""
+        if _has_age_span:
+            _age_note = (
+                "\n⚠️ 年龄动态提示：视觉档案描述的是角色一生的外貌变化范围，"
+                "不是所有镜头的统一模板。请根据【当前段落文案】的具体剧情阶段来推断角色"
+                "此时此刻的实际年龄和形象（少年/青年/中年/老年），不要把所有镜头都画成同一个年龄。"
+            )
+        visual_block = f"""\n\n配图视觉档案（角色可变特征参考，根据当前段落时间点灵活调整）：
 {visual_context.strip()}
+{_age_note}
 """
 
     # 8:9 近方形卡片版式：额外构图约束（对标满宽大图展示区）
@@ -498,9 +604,22 @@ async def generate_all_images(
     if not task:
         return {"error": f"任务 {task_id} 不存在", "total_segments": 0}
 
+    # ★ 防并发栅栏：如果已有生图正在执行，直接拒绝
+    if task.images_generating:
+        # 安全检查：如果标记为 generating 但 DB 里一张图都没有 → 上次启动后立即崩溃，
+        # 允许本次请求继续（否则任务永久卡死）
+        img_count = db.query(TaskImage).filter(TaskImage.task_id == task_id).count()
+        if img_count == 0:
+            print(f"[image:v4] 检测到僵尸 generating 标记（0 张已存图），自动解除并允许重试")
+        else:
+            return {"error": "配图正在生成中，请勿重复操作。刷新页面即可看到最新进度。", "total_segments": 0}
+    task.images_generating = True
+    task.images_complete = False
+    db.commit()
+
     rewritten = task.rewritten_transcript or ""
     if not rewritten.strip():
-        tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
+        tasks_dir = os.path.join(get_data_dir(), "tasks")
         task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
         rewritten_file = os.path.join(task_dir, "rewritten.txt")
         if os.path.exists(rewritten_file):
@@ -508,6 +627,8 @@ async def generate_all_images(
                 rewritten = f.read()
 
     if not rewritten.strip():
+        task.images_generating = False
+        db.commit()
         return {"error": "没有改写稿，请先完成文本改写", "total_segments": 0}
 
     # 2. 按强标点切句（与视频合成阶段参数完全一致）
@@ -557,115 +678,193 @@ async def generate_all_images(
         TARGET_W, TARGET_H = 1080, 1920
 
     # 4. 数据目录
-    tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
+    tasks_dir = os.path.join(get_data_dir(), "tasks")
     task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
     images_dir = os.path.join(task_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
 
-    # 5. 清理旧配图记录
-    old_count = db.query(TaskImage).filter(TaskImage.task_id == task_id).delete()
-    db.commit()
-    if old_count > 0:
-        print(f"[image:v4] 已清除 {old_count} 条旧配图记录")
+    # 5. 不再无脑清空旧记录 → 改为逐段 upsert + 末尾清理多余（防并发竞态）
+    # 旧记录在每个 segment 循环中按 seg_idx 覆盖写入
 
-    # 6. 逐段单图直生
-    total_success = 0
-    total_failed = 0
+    # 6. 并行单图直生（v5：4 路并发 + 两阶段架构，DB session 安全）
+    # 阶段 1：全部 API 调用并发执行（纯网络 I/O，不碰 DB）
+    # 阶段 2：串行落盘 + DB upsert（保证 SQLAlchemy session 单线程安全）
+    import asyncio as _asyncio
+    MAX_CONCURRENT = 4
+    sem = _asyncio.Semaphore(MAX_CONCURRENT)
 
-    for seg_idx, sentence in enumerate(sentences):
-        target_path = os.path.join(images_dir, f"seg_{seg_idx:03d}.png")
+    async def _generate_one(seg_idx: int, sentence: str) -> dict:
+        """生成单张配图（纯 API 调用 + prompt 文件写入，不碰 DB）。"""
+        async with sem:
+            target_path = os.path.join(images_dir, f"seg_{seg_idx:03d}.png")
 
-        # 跳过已存在的成功图片（支持断点续跑）
-        if os.path.exists(target_path) and os.path.getsize(target_path) > 1000:
-            print(f"[image:v4] 段 {seg_idx + 1}/{total_segments} 已存在，跳过")
-            total_success += 1
-            continue
+            # 跳过已存在的成功图片（支持断点续跑）
+            if os.path.exists(target_path) and os.path.getsize(target_path) > 1000:
+                print(f"[image:v4] 段 {seg_idx + 1}/{total_segments} 已存在（并发检测），跳过")
+                return {"seg_idx": seg_idx, "status": "skipped", "target_path": target_path}
 
-        text_len = len(sentence.strip())
-        print(
-            f"[image:v4] 段 {seg_idx + 1}/{total_segments}: "
-            f"{text_len} 字, size={REQUEST_W}x{REQUEST_H}, aspect={aspect_ratio}"
-        )
+            text_len = len(sentence.strip())
+            print(
+                f"[image:v4] 段 {seg_idx + 1}/{total_segments}: "
+                f"{text_len} 字, size={REQUEST_W}x{REQUEST_H}, aspect={aspect_ratio}"
+            )
 
-        # 6a. 构建 Prompt（视觉档案 + 风格圣经 + 风格后缀 + 安全补丁）
-        base_prompt = build_single_segment_prompt(
-            text=sentence,
-            book_title=book_title,
-            book_author=book_author,
-            segment_index=seg_idx,
-            total_segments=total_segments,
-            style_bible=style_bible,
-            aspect_ratio=aspect_ratio,
-            visual_context=visual_context,
-        )
-        style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
-        final_prompt = base_prompt + style_suffix + SAFETY_SUFFIX
+            # 构建 Prompt
+            base_prompt = build_single_segment_prompt(
+                text=sentence,
+                book_title=book_title,
+                book_author=book_author,
+                segment_index=seg_idx,
+                total_segments=total_segments,
+                style_bible=style_bible,
+                aspect_ratio=aspect_ratio,
+                visual_context=visual_context,
+            )
+            style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
+            final_prompt = base_prompt + style_suffix + SAFETY_SUFFIX
 
-        # 6b. 保存 prompt 到文件
-        prompt_path = os.path.join(images_dir, f"seg_{seg_idx:03d}_prompt.txt")
-        with open(prompt_path, "w", encoding="utf-8") as f:
-            f.write(final_prompt)
+            # 保存 prompt 到文件
+            prompt_path = os.path.join(images_dir, f"seg_{seg_idx:03d}_prompt.txt")
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write(final_prompt)
 
-        # 6c. 多通道生图（fal → sanitized → generic → keling → sanitized keling → 占位图）
-        img_bytes = None
-        error_msg = ""
-        try:
-            b64 = await _generate_fal(final_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
-            if b64:
-                img_bytes = base64.b64decode(b64)
-            else:
-                # fal 失败 → 尝试 sanitized prompt 重试（Fal.ai 的 422 通常是内容审查）
-                sanitized = _sanitize_prompt(final_prompt)
-                if sanitized != final_prompt:
-                    print(f"[image:v4] 段 {seg_idx + 1} fal 首次失败 → 降敏重试")
-                    b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
-                    if b64:
-                        img_bytes = base64.b64decode(b64)
-                        final_prompt = sanitized
-
-                # sanitized 也失败 → 用完全不引用原文的通用 prompt（解决上下文级审查）
-                generic = None
-                if not img_bytes:
-                    generic = _build_generic_prompt(
-                        book_title=book_title, book_author=book_author,
-                        segment_index=seg_idx, total_segments=total_segments,
-                        style_bible=style_bible, aspect_ratio=aspect_ratio,
-                        visual_context=visual_context,
-                    )
-                    generic += style_suffix + SAFETY_SUFFIX
-                    print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → 通用 prompt 兜底")
-                    b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
-                    if b64:
-                        img_bytes = base64.b64decode(b64)
-                        final_prompt = generic
-
-                if not img_bytes:
-                    # fal 全部失败 → 尝试可灵
-                    keling_size = f"{TARGET_W}x{TARGET_H}"
-                    b64 = await _generate_keling(final_prompt, size=keling_size)
-                    if b64:
-                        img_bytes = base64.b64decode(b64)
-                    elif sanitized != final_prompt:
-                        b64 = await _generate_keling(sanitized, size=keling_size)
+            # 多通道生图（fal → sanitized → generic → keling → sanitized keling）
+            img_bytes = None
+            error_msg = ""
+            try:
+                b64 = await _generate_fal(final_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                if b64:
+                    img_bytes = base64.b64decode(b64)
+                else:
+                    # fal 失败 → 降敏重试
+                    sanitized = _sanitize_prompt(final_prompt)
+                    if sanitized != final_prompt:
+                        print(f"[image:v4] 段 {seg_idx + 1} fal 首次失败 → 降敏重试")
+                        b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
                         if b64:
                             img_bytes = base64.b64decode(b64)
                             final_prompt = sanitized
-                        elif generic is not None:
-                            b64 = await _generate_keling(generic, size=keling_size)
+
+                    # sanitized 也失败 → LLM 语义安全改写（保留同场景同情绪，去掉触发审查的具象描写）
+                    generic = None
+                    if not img_bytes:
+                        print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → LLM 安全改写")
+                        safe_sentence = await _llm_sanitize_segment(
+                            sentence=sentence,
+                            book_title=book_title,
+                            book_author=book_author,
+                            segment_index=seg_idx,
+                            total_segments=total_segments,
+                            visual_context=visual_context,
+                        )
+                        if safe_sentence != sentence:
+                            # 用 LLM 改写后的句子重建 prompt
+                            llm_base = build_single_segment_prompt(
+                                text=safe_sentence,
+                                book_title=book_title,
+                                book_author=book_author,
+                                segment_index=seg_idx,
+                                total_segments=total_segments,
+                                style_bible=style_bible,
+                                aspect_ratio=aspect_ratio,
+                                visual_context=visual_context,
+                            )
+                            llm_prompt = llm_base + style_suffix + SAFETY_SUFFIX
+                            print(f"[image:v4] 段 {seg_idx + 1} LLM 改写完成 → 重试 Fal.ai")
+                            b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
                             if b64:
                                 img_bytes = base64.b64decode(b64)
-                                final_prompt = generic
+                                final_prompt = llm_prompt
+                                print(f"[image:v4] 段 {seg_idx + 1} LLM 改写后生图成功")
+
+                    # LLM 改写也失败 → 通用 prompt 兜底
+                    if not img_bytes:
+                        generic = _build_generic_prompt(
+                            book_title=book_title, book_author=book_author,
+                            segment_index=seg_idx, total_segments=total_segments,
+                            style_bible=style_bible, aspect_ratio=aspect_ratio,
+                            visual_context=visual_context,
+                        )
+                        generic += style_suffix + SAFETY_SUFFIX
+                        print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → 通用 prompt 兜底")
+                        b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                        if b64:
+                            img_bytes = base64.b64decode(b64)
+                            final_prompt = generic
+
+                    if not img_bytes:
+                        # fal 全部失败 → 可灵
+                        keling_size = f"{TARGET_W}x{TARGET_H}"
+                        b64 = await _generate_keling(final_prompt, size=keling_size)
+                        if b64:
+                            img_bytes = base64.b64decode(b64)
+                        elif sanitized != final_prompt:
+                            b64 = await _generate_keling(sanitized, size=keling_size)
+                            if b64:
+                                img_bytes = base64.b64decode(b64)
+                                final_prompt = sanitized
+                            elif generic is not None:
+                                b64 = await _generate_keling(generic, size=keling_size)
+                                if b64:
+                                    img_bytes = base64.b64decode(b64)
+                                    final_prompt = generic
+                                else:
+                                    error_msg = "所有生图通道均失败"
                             else:
                                 error_msg = "所有生图通道均失败"
                         else:
                             error_msg = "所有生图通道均失败"
-                    else:
-                        error_msg = "所有生图通道均失败"
-        except Exception as e:
-            error_msg = f"生图异常: {type(e).__name__}: {e}"
-            print(f"[image:v4] 段 {seg_idx + 1} 异常: {error_msg}")
+            except Exception as e:
+                error_msg = f"生图异常: {type(e).__name__}: {e}"
+                print(f"[image:v4] 段 {seg_idx + 1} 异常: {error_msg}")
 
-        # 6d. 写入 & 校验
+            return {
+                "seg_idx": seg_idx,
+                "status": "success" if img_bytes else "failed",
+                "target_path": target_path,
+                "img_bytes": img_bytes,
+                "final_prompt": final_prompt,
+                "error_msg": error_msg,
+            }
+
+    # 并发启动全部生图任务
+    start_time = time.time()
+    gen_results = await _asyncio.gather(*[
+        _generate_one(i, s) for i, s in enumerate(sentences)
+    ])
+    elapsed = time.time() - start_time
+    print(f"[image:v4] 全部 {total_segments} 张图 API 调用完成，耗时 {elapsed:.0f}s（并发数={MAX_CONCURRENT}）")
+
+    # ===== 阶段 2：串行落盘 + DB upsert（保证 SQLAlchemy session 安全） =====
+    total_success = 0
+    total_failed = 0
+
+    for result in gen_results:
+        seg_idx = result["seg_idx"]
+        target_path = result["target_path"]
+        final_prompt = result.get("final_prompt", "")
+        error_msg = result.get("error_msg", "")
+        img_bytes = result.get("img_bytes")
+
+        if result["status"] == "skipped":
+            # ★ 补 DB 记录（断点续跑的场景：文件存在但 DB 可能缺记录）
+            existing = db.query(TaskImage).filter(
+                TaskImage.task_id == task_id, TaskImage.segment_index == seg_idx
+            ).first()
+            if not existing:
+                db.add(TaskImage(
+                    task_id=task_id, segment_index=seg_idx, grid_index=-1, cell_position=1,
+                    image_path=target_path, status="success",
+                ))
+                db.commit()
+            elif existing.status != "success":
+                existing.status = "success"
+                existing.image_path = target_path
+                db.commit()
+            total_success += 1
+            continue
+
+        # 落盘 + resize
         if img_bytes:
             tmp_path = target_path + ".tmp"
             try:
@@ -691,7 +890,7 @@ async def generate_all_images(
                 except Exception:
                     pass
 
-        # 6e. 失败兜底：生成占位图
+        # 失败兜底：生成占位图
         if not img_bytes:
             print(f"[image:v4] 段 {seg_idx + 1} 失败 → 占位图: {error_msg}")
             try:
@@ -703,26 +902,44 @@ async def generate_all_images(
                 pass
             total_failed += 1
 
-        # 6f. 写入数据库
-        ti = TaskImage(
-            task_id=task_id,
-            segment_index=seg_idx,
-            grid_index=-1,  # v4: 无九宫格，统一 -1
-            cell_position=1,
-            image_path=target_path if (os.path.exists(target_path) and os.path.getsize(target_path) > 1000) else None,
-            prompt_used=final_prompt,
-            status="success" if img_bytes else "failed",
-            error_msg=error_msg if error_msg else None,
-        )
-        db.add(ti)
+        # DB upsert
+        existing = db.query(TaskImage).filter(
+            TaskImage.task_id == task_id, TaskImage.segment_index == seg_idx
+        ).first()
+        image_ok = os.path.exists(target_path) and os.path.getsize(target_path) > 1000
+        if existing:
+            existing.image_path = target_path if image_ok else existing.image_path
+            existing.prompt_used = final_prompt
+            existing.status = "success" if img_bytes else "failed"
+            existing.error_msg = error_msg if error_msg else None
+            existing.grid_index = -1
+            existing.cell_position = 1
+        else:
+            ti = TaskImage(
+                task_id=task_id,
+                segment_index=seg_idx,
+                grid_index=-1,
+                cell_position=1,
+                image_path=target_path if image_ok else None,
+                prompt_used=final_prompt,
+                status="success" if img_bytes else "failed",
+                error_msg=error_msg if error_msg else None,
+            )
+            db.add(ti)
         db.commit()
 
-        # 段间稍息
-        if seg_idx < total_segments - 1:
-            await asyncio.sleep(0.5)
+    # 7. 收尾：清理多余旧记录 + 写入完成标记
+    # 删除超出当前 total_segments 范围的残留记录（旧版留下的）
+    extra = db.query(TaskImage).filter(
+        TaskImage.task_id == task_id, TaskImage.segment_index >= total_segments
+    ).delete()
+    if extra > 0:
+        print(f"[image:v4] 清理 {extra} 条多余旧配图记录")
 
-    # 7. 收尾
     task.current_step = max(task.current_step, 4)
+    task.images_generating = False
+    task.images_complete = True
+    task.total_images = total_segments
     db.commit()
 
     print(
@@ -759,7 +976,7 @@ async def regenerate_single_image(
     quality = os.getenv("FAL_QUALITY", "low")
     visual_context = task.visual_context or "" if task else ""
 
-    tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
+    tasks_dir = os.path.join(get_data_dir(), "tasks")
     task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
 
     rewritten = task.rewritten_transcript or ""
@@ -816,8 +1033,37 @@ async def regenerate_single_image(
             b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
             if b64:
                 prompt = sanitized
-        # sanitized 也失败 → 通用 prompt（完全去掉原文避免上下文级审查）
+        # sanitized 也失败 → LLM 语义安全改写（保留同场景同情绪）
         generic = None
+        if not b64:
+            print(f"[image:single] 降敏仍失败 → LLM 安全改写")
+            safe_text = await _llm_sanitize_segment(
+                sentence=text,
+                book_title=book_title,
+                book_author=book_author,
+                segment_index=segment_index,
+                total_segments=len(sentences),
+                visual_context=visual_context,
+            )
+            if safe_text != text:
+                llm_base = build_single_segment_prompt(
+                    text=safe_text,
+                    book_title=book_title,
+                    book_author=book_author,
+                    segment_index=segment_index,
+                    total_segments=len(sentences),
+                    style_bible=style_bible,
+                    aspect_ratio=aspect_ratio,
+                    visual_context=visual_context,
+                )
+                llm_prompt = llm_base + style_suffix + SAFETY_SUFFIX
+                print(f"[image:single] LLM 改写完成 → 重试 Fal.ai")
+                b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                if b64:
+                    prompt = llm_prompt
+                    print(f"[image:single] LLM 改写后生图成功")
+
+        # LLM 改写也失败 → 通用 prompt 兜底（完全去掉原文避免上下文级审查）
         if not b64:
             generic = _build_generic_prompt(
                 book_title=book_title, book_author=book_author,
@@ -937,18 +1183,28 @@ def get_images_for_task(task_id: int, db) -> list[dict]:
         .all()
     )
 
-    # 读取句子文本用于前端展示
-    tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
+    # 读取句子文本用于前端展示（带缓存：same rewritten.txt → same result）
+    tasks_dir = os.path.join(get_data_dir(), "tasks")
     task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
     rewritten_file = os.path.join(task_dir, "rewritten.txt")
-    sentences = []
+    sentences: list[str] = []
     if os.path.exists(rewritten_file):
-        with open(rewritten_file, "r", encoding="utf-8") as f:
-            rewritten = f.read()
-        sentences = split_into_short_sentences(rewritten, max_chars=80, min_chars=30)
+        # 以文件 mtime 作为缓存键：只有 rewritten.txt 被重写时才重新切句
+        _file_key = (
+            task_id,
+            int(os.path.getmtime(rewritten_file)) if os.path.exists(rewritten_file) else 0,
+        )
+        if _file_key not in _SENTENCE_CACHE:
+            with open(rewritten_file, "r", encoding="utf-8") as f:
+                rewritten = f.read()
+            _SENTENCE_CACHE[_file_key] = split_into_short_sentences(
+                rewritten, max_chars=80, min_chars=30
+            )
+        sentences = _SENTENCE_CACHE[_file_key]
 
-    import time as _time
-    _cache_buster = int(_time.time())
+    # ★ 稳定缓存破壁：每张图用自己文件的 mtime 做 ?t=
+    # 生图期间文件 mtime 不变 → 浏览器复用本地缓存 → 零重复下载
+    # 配图重新生成后 mtime 更新 → 浏览器自动刷新单张
 
     return [
         {
@@ -957,7 +1213,12 @@ def get_images_for_task(task_id: int, db) -> list[dict]:
             "segment_index": r.segment_index,
             "grid_index": -1,  # v4: 单图直生，无九宫格
             "cell_position": 1,
-            "image_url": f"/images/{task_id}/images/seg_{r.segment_index:03d}.png?t={_cache_buster}" if r.image_path else None,
+            "image_url": (
+                f"/images/{task_id}/images/seg_{r.segment_index:03d}.png"
+                f"?t={int(os.path.getmtime(r.image_path))}"
+                if r.image_path and os.path.exists(r.image_path)
+                else None
+            ),
             "image_exists": bool(r.image_path and os.path.exists(r.image_path)),
             "status": r.status,
             "error_msg": r.error_msg,

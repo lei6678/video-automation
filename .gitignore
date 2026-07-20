@@ -35,3 +35,14 @@ desktop.ini
 *.tmp
 *.log
 nohup.out
+
+# 打包构建输出
+build/
+
+# BGM 音频文件体积较大，单独管理
+bgm/*.mp3
+bgm/*.wav
+bgm/*.m4a
+bgm/*.aac
+bgm/*.flac
+bgm/*.ogg

@@ -2,7 +2,7 @@
 SQLAlchemy 数据模型
 """
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean
 from sqlalchemy.types import JSON
 from database import Base
 
@@ -23,6 +23,9 @@ class Task(Base):
     video_title = Column(String, nullable=True)      # AI 生成的爆款标题（百货/流量赛道）
     content_mode = Column(String, default="book")     # "book"=图书赛道 | "general"=百货与流量赛道
     visual_context = Column(Text, nullable=True)       # 配图视觉档案（LLM 提取的主角特征，确保人物一致性）
+    images_generating = Column(Boolean, default=False) # 是否有生图请求正在执行（防并发）
+    images_complete = Column(Boolean, default=False)   # 全部生图是否已结束（不管成败）
+    total_images = Column(Integer, default=0)          # 预期总配图张数
     error_msg = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

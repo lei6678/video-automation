@@ -20,22 +20,29 @@ from models import Base, Task, TaskSegment, TaskImage
 from services.douyin_service import fetch_douyin_video_info
 from services.asr_service import transcribe_media
 from services.llm_service import rewrite_script
+from _resource import get_data_dir, get_project_root
 
 # 确保应用启动时创建必要的目录
-TASKS_DIR = os.path.join(os.path.dirname(__file__), "data", "tasks")
+TASKS_DIR = os.path.join(get_data_dir(), "tasks")
 os.makedirs(TASKS_DIR, exist_ok=True)
 
 # 创建数据库表
 Base.metadata.create_all(bind=engine)
 
-# 安全地给 tasks 表添加 error_msg 列（如果列不存在的话）
+# 安全地给 tasks 表添加新列（如果列不存在的话，幂等迁移）
 from sqlalchemy import text
 with engine.connect() as conn:
-    try:
-        conn.execute(text("ALTER TABLE tasks ADD COLUMN error_msg TEXT"))
-        conn.commit()
-    except Exception:
-        pass  # 列已存在则忽略
+    for col_sql in [
+        "ALTER TABLE tasks ADD COLUMN error_msg TEXT",
+        "ALTER TABLE tasks ADD COLUMN images_generating BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN images_complete BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE tasks ADD COLUMN total_images INTEGER NOT NULL DEFAULT 0",
+    ]:
+        try:
+            conn.execute(text(col_sql))
+            conn.commit()
+        except Exception:
+            pass  # 列已存在则忽略
 
 app = FastAPI(
     title="视频自动化制作工作流",
@@ -44,12 +51,11 @@ app = FastAPI(
 )
 
 # 挂载静态音频目录，前端可通过 /audio/{task_id}/final_audio.mp3 访问
-AUDIO_DIR = os.path.join(os.path.dirname(__file__), "data", "tasks")
-os.makedirs(AUDIO_DIR, exist_ok=True)
+AUDIO_DIR = TASKS_DIR
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 # 配图 & 视频静态服务
-IMAGES_DIR = os.path.join(os.path.dirname(__file__), "data", "tasks")
+IMAGES_DIR = TASKS_DIR
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 app.mount("/video", StaticFiles(directory=IMAGES_DIR), name="video")
 
@@ -118,8 +124,17 @@ class CreateTaskResponse(BaseModel):
     task_id: int
 
 
+class ImageSummary(BaseModel):
+    """配图进度摘要（供前端状态条和按钮锁定使用）"""
+    total: int = 0
+    success: int = 0
+    failed: int = 0
+    generating: bool = False
+    complete: bool = False
+
+
 class TaskDetailResponse(BaseModel):
-    """任务详情响应（v5：含赛道信息）"""
+    """任务详情响应（v9：含配图进度摘要）"""
     id: int
     source_url: str
     status: str
@@ -132,6 +147,7 @@ class TaskDetailResponse(BaseModel):
     video_title: str | None = None
     content_mode: str | None = "book"
     visual_context: str | None = None
+    image_summary: ImageSummary | None = None
     error_msg: str | None
     created_at: datetime
 
@@ -331,12 +347,13 @@ class ImageInfo(BaseModel):
 
 
 class ImageListResponse(BaseModel):
-    """配图列表响应"""
+    """配图列表响应（v9：含进度摘要）"""
     task_id: int
     images: list[dict]
     total: int
     success_count: int
     failed_count: int
+    image_summary: ImageSummary | None = None
 
 
 # ============== 视频合成请求/响应 ==============
@@ -538,6 +555,19 @@ async def get_task_detail(task_id: int, db: Session = Depends(get_db)):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
 
+    # 构建配图进度摘要
+    from models import TaskImage
+    img_records = db.query(TaskImage).filter(TaskImage.task_id == task_id).all()
+    img_success = sum(1 for r in img_records if r.status == "success")
+    img_failed = sum(1 for r in img_records if r.status == "failed")
+    image_summary = ImageSummary(
+        total=task.total_images or len(img_records) or 0,
+        success=img_success,
+        failed=img_failed,
+        generating=task.images_generating,
+        complete=task.images_complete,
+    )
+
     return TaskDetailResponse(
         id=task.id,
         source_url=task.source_url,
@@ -550,6 +580,7 @@ async def get_task_detail(task_id: int, db: Session = Depends(get_db)):
         video_title=task.video_title,
         content_mode=task.content_mode,
         visual_context=task.visual_context,
+        image_summary=image_summary,
         douyin_meta=task.douyin_meta or {},
         error_msg=task.error_msg,
         created_at=task.created_at,
@@ -1056,8 +1087,7 @@ async def init_segments(request: GenerateAudioRequest, db: Session = Depends(get
     db.commit()
 
     # 删除旧的物理音频文件
-    tasks_dir = os.path.join(os.path.dirname(__file__), "data", "tasks")
-    task_folder = os.path.join(tasks_dir, str(task_id))
+    task_folder = os.path.join(TASKS_DIR, str(task_id))
     segments_folder = os.path.join(task_folder, "segments")
     if os.path.exists(segments_folder):
         import shutil
@@ -1161,7 +1191,6 @@ async def generate_audio_endpoint(request: GenerateAudioRequest, db: Session = D
     if not task:
         return GenerateAudioResponse(audio_url="", message=f"任务 {task_id} 不存在", segments=[], error_msg=None)
 
-    TASKS_DIR = os.path.join(os.path.dirname(__file__), "data", "tasks")
     task_folder = os.path.join(TASKS_DIR, str(task_id))
     segments_folder = os.path.join(task_folder, "segments")
     os.makedirs(segments_folder, exist_ok=True)
@@ -1317,7 +1346,7 @@ async def get_segments(task_id: int, db: Session = Depends(get_db)):
     从 TaskSegment 表查询切片列表，返回完整状态。
     用于前端渲染分段控制台（GET 时直接查询数据库，跳过 HTTP 调用）。
     """
-    task_folder = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_folder = os.path.join(TASKS_DIR, str(task_id))
     final_path = os.path.join(task_folder, "final_tts.mp3")
 
     db_segs = db.query(TaskSegment).filter(
@@ -1367,7 +1396,7 @@ async def regenerate_segment(request: RegenerateSegmentRequest, db: Session = De
     voice = request.voice
     rate = request.rate
 
-    task_folder = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_folder = os.path.join(TASKS_DIR, str(task_id))
     segments_folder = os.path.join(task_folder, "segments")
     os.makedirs(segments_folder, exist_ok=True)
 
@@ -1443,7 +1472,7 @@ async def merge_segments_endpoint(request: MergeSegmentsRequest):
     手动触发拼接：只合并 status=success 的片段。
     """
     task_id = request.task_id
-    task_folder = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_folder = os.path.join(TASKS_DIR, str(task_id))
     segments_folder = os.path.join(task_folder, "segments")
     final_path = os.path.join(task_folder, "final_tts.mp3")
 
@@ -1492,16 +1521,26 @@ async def generate_images(request: GenerateImagesRequest, db: Session = Depends(
             message="没有改写稿，请先完成文本改写（Step 02）",
         )
 
-    result = await generate_all_images(
-        task_id=task_id,
-        db=db,
-        style=request.style,
-        book_title=task.book_title or "",
-        book_author=task.book_author or "",
-        aspect_ratio=request.aspect_ratio,
-    )
+    try:
+        result = await generate_all_images(
+            task_id=task_id,
+            db=db,
+            style=request.style,
+            book_title=task.book_title or "",
+            book_author=task.book_author or "",
+            aspect_ratio=request.aspect_ratio,
+        )
+    except Exception as e:
+        # 生图过程异常崩了 → 复位 generating 标记，避免任务永久卡死
+        task.images_generating = False
+        db.commit()
+        return GenerateImagesResponse(
+            task_id=task_id, total_segments=0, total_images=0,
+            success=0, failed=0, message=f"生图异常: {type(e).__name__}: {str(e)}",
+        )
 
     if "error" in result:
+        # 如果 generate_all_images 返回了错误（含"正在生成中"），确保 generating 已复位
         return GenerateImagesResponse(
             task_id=task_id, total_segments=0, total_images=0,
             success=0, failed=0, message=result["error"],
@@ -1581,12 +1620,22 @@ async def regenerate_segment_image(request: RegenerateSegmentImageRequest, db: S
 
 @app.get("/api/images/{task_id}", response_model=ImageListResponse)
 async def get_images(task_id: int, db: Session = Depends(get_db)):
-    """查询任务的所有配图"""
+    """查询任务的所有配图（v9：含进度摘要，前端用于状态条和按钮锁定）"""
     from services.image_service import get_images_for_task
+    from models import Task
 
     records = get_images_for_task(task_id, db)
     success_count = sum(1 for r in records if r["status"] == "success")
     failed_count = sum(1 for r in records if r["status"] == "failed")
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    image_summary = ImageSummary(
+        total=task.total_images if task else len(records),
+        success=success_count,
+        failed=failed_count,
+        generating=task.images_generating if task else False,
+        complete=task.images_complete if task else False,
+    )
 
     return ImageListResponse(
         task_id=task_id,
@@ -1594,6 +1643,7 @@ async def get_images(task_id: int, db: Session = Depends(get_db)):
         total=len(records),
         success_count=success_count,
         failed_count=failed_count,
+        image_summary=image_summary,
     )
 
 
@@ -1644,7 +1694,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         rendered_disclaimer = request.bottom_disclaimer
 
     # === 提取共享数据（所有模式共用） ===
-    tasks_dir = _os.path.join(_os.path.dirname(__file__), "data", "tasks")
+    tasks_dir = TASKS_DIR
     task_dir = _os.path.join(_os.path.abspath(tasks_dir), str(task_id))
     final_audio = _os.path.join(task_dir, "final_tts.mp3")
 
@@ -1946,7 +1996,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
 @app.get("/api/video/status/{task_id}", response_model=VideoStatusResponse)
 async def get_video_status(task_id: int):
     """检查视频文件是否存在"""
-    task_dir = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_dir = os.path.join(TASKS_DIR, str(task_id))
     final_video = os.path.join(task_dir, "final_1080x1920.mp4")
 
     exists = os.path.exists(final_video)
@@ -2017,7 +2067,7 @@ async def download_jianying_draft(task_id: int):
     """
     from fastapi.responses import FileResponse
 
-    task_dir = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_dir = os.path.join(TASKS_DIR, str(task_id))
     draft_path = os.path.join(task_dir, "draft_content.json")
 
     if not os.path.exists(draft_path):
@@ -2042,7 +2092,7 @@ async def download_subtitles(task_id: int, format: str = "srt"):
     """
     from fastapi.responses import FileResponse
 
-    task_dir = os.path.join(os.path.dirname(__file__), "data", "tasks", str(task_id))
+    task_dir = os.path.join(TASKS_DIR, str(task_id))
     if format == "ass":
         sub_path = os.path.join(task_dir, "subtitles.ass")
     else:
@@ -2112,6 +2162,7 @@ def _detect_lan_ip() -> str:
 
 if __name__ == "__main__":
     import uvicorn
+    import sys as _sys
 
     print("=" * 56)
     print("  Video Automation Server")
@@ -2125,4 +2176,9 @@ if __name__ == "__main__":
     print(f"  API docs:         http://localhost:8000/docs")
     print("=" * 56)
     print()
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+    _frozen = getattr(_sys, 'frozen', False)
+    if _frozen:
+        uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    else:
+        uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

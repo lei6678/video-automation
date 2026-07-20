@@ -1,5 +1,47 @@
 # 项目备忘录
 
+## 2026-07-18 生图性能诊断与三连修复
+
+### 一、问题发现
+
+用户报告 task 72 生图耗时约 1 小时（33 张），后端日志 89% 是前端轮询触发的重复图片下载（920/1036 行），真正的生图日志仅 5 行。
+
+### 二、三连修复（`image_service.py`）
+
+| # | 改动 | 文件位置 | 效果 |
+|---|------|---------|------|
+| **并行生图** | `for` 串行 → `asyncio.gather` + `Semaphore(4)`，两阶段架构（API 并发 + DB 串行） | `generate_all_images` §6 | 33 张从 ~60min → ~15-20min |
+| **轮询缓存爆破** | `?t={time.time()}` → `?t={文件 mtime}`（同一文件 mtime 不变 → 浏览器不重复下载）；新增 `_SENTENCE_CACHE` 字典缓存句切分结果 | `get_images_for_task` | 日志噪音 -90%，消除每 2 秒全量重下载 |
+| **LLM 语义安全改写** | 关键词 sanitize 失败后、generic 兜底前，新增 `_llm_sanitize_segment()` 用 DeepSeek 改写原文为"同情绪同场景的含蓄画面描述"，仅用于生图 prompt | `_generate_one` / `regenerate_single_image` 降级链 | 12/33（36%）generic 兜底 → 预计降至 0-3 张 |
+
+### 三、LLM 改写降级链
+
+```
+Fal.ai 原始 prompt
+  ↓ 失败
+关键词替换 (_sanitize_prompt)
+  ↓ 仍失败
+LLM 语义改写 (_llm_sanitize_segment) ← 新增，不动 rewritten.txt / 配音 / 字幕
+  ↓ 仍失败
+通用场景 (_build_generic_prompt)
+  ↓ 仍失败
+可灵 API → 纯黑占位图
+```
+
+### 四、根因诊断
+
+Fal.ai 语义级安全审查拒绝高度悲剧性内容（死亡、流血、极端贫困、儿童苦难），47 个关键词映射表 `_CONTENT_SANITIZE_MAP` 偏暴力/性/自残类，完全命不中苦难叙事中的"安全但不快"表达。
+
+---
+
+## 明天计划（2026-07-19）
+
+1. **实机验证三连修复**：用 task 72 同类苦难叙事素材跑一次完整生图，观察并行速度、LLM 改写成功率、generic 兜底率。
+2. **LLM 改写 prompt 调优**：如果改写后 Fal.ai 仍拒绝率 > 20%，调整 `_llm_sanitize_segment` 的 system prompt（更激进地抽象化具象苦难描写）。
+3. **监控生图成本**：LLM 改写每段多 1 次 DeepSeek 调用（~1 美分/段），实际触发率需控制在预期内。
+
+---
+
 ## 2026-07-17 局域网多人协作部署（里程碑）
 
 ### 一、问题背景

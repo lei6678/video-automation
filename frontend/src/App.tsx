@@ -34,6 +34,7 @@ interface TaskDetail {
   video_title: string | null
   content_mode: string | null
   visual_context: string | null
+  image_summary?: { total: number; success: number; failed: number; generating: boolean; complete: boolean } | null
   error_msg: string | null
   created_at: string
 }
@@ -146,6 +147,7 @@ function App() {
   const [imageTotalExpected, setImageTotalExpected] = useState(0)  // 预期总张数
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null)  // 当前大图预览的段号
   const [isRegeneratingImage, setIsRegeneratingImage] = useState<number | null>(null)  // 正在单段重跑的段号
+  const [imageSummary, setImageSummary] = useState<{total: number; success: number; failed: number; generating: boolean; complete: boolean} | null>(null)  // v9: 后端权威配图进度
   const [isVideoLoading, setIsVideoLoading] = useState(false)
   const [videoUrl, setVideoUrl] = useState('')
   const [videoMessage, setVideoMessage] = useState('')
@@ -448,6 +450,7 @@ function App() {
     if (!taskId) return
     setIsImageLoading(true)
     setImageMessage('')
+    setImageSummary(null)  // v9: 清除旧进度，等待后端返回新摘要
     // 清除之前的轮询
     if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
 
@@ -459,9 +462,17 @@ function App() {
     }).then(async (resp) => {
       const data = await resp.json()
       setImageTotalExpected(data.total_segments || 0)
+      // v9: 如果后端返回错误（如"正在生成中"），显示给操作者
+      if (data.message && data.total_segments === 0) {
+        setImageMessage(data.message)
+        setIsImageLoading(false)
+        if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
+      }
     }).catch((e) => {
       console.error('配图生成请求失败:', e)
       setImageMessage('配图生成请求失败，请检查后端日志')
+      setIsImageLoading(false)
+      if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
     })
 
     // 立即开始轮询，每 2 秒刷新一次图片列表
@@ -471,18 +482,26 @@ function App() {
         if (!resp.ok) return
         const data = await resp.json()
         setImages(data.images || [])
-        const successCount = (data.images || []).filter((i: any) => i.status === 'success').length
-        const total = data.total || 0
-        const expected = imageTotalExpected || 0
-        setImageMessage(`已生成 ${successCount} / ${total} 张配图`)
-
-        // 停止条件：① total >= expected 且无 pending ② 或 POST 已完成且图片数稳定
-        const hasPending = (data.images || []).some((i: any) => i.status === 'pending')
-        const done = (expected > 0 && total >= expected && !hasPending) || (expected === 0 && total > 0 && !hasPending && successCount === total)
-        if (done) {
-          if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
-          setIsImageLoading(false)
-          setImageMessage(`配图生成完成：${successCount} 张成功，${total - successCount} 张失败`)
+        // v9: 使用后端权威的 image_summary（不再前端自己数）
+        if (data.image_summary) {
+          setImageSummary(data.image_summary)
+          const s = data.image_summary
+          setImageMessage(`已生成 ${s.success} / ${s.total} 张配图`)
+          // 终止条件：后端标记 complete=true（权威判断，无论成功还是失败）
+          if (s.complete) {
+            if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
+            setIsImageLoading(false)
+            setImageMessage(
+              s.failed > 0
+                ? `配图生成完成：${s.success} 张成功，${s.failed} 张失败`
+                : `配图生成完成：${s.success} 张全部成功`
+            )
+          }
+        } else {
+          // 兜底：后端未返回 image_summary 时用旧逻辑
+          const successCount = (data.images || []).filter((i: any) => i.status === 'success').length
+          const total = data.total || 0
+          setImageMessage(`已生成 ${successCount} / ${total} 张配图`)
         }
       } catch (e) {
         // 网络抖动不中断轮询
@@ -497,6 +516,9 @@ function App() {
       if (resp.ok) {
         const data = await resp.json()
         setImages(data.images || [])
+        if (data.image_summary) {
+          setImageSummary(data.image_summary)
+        }
         setSelectedImageIndex(null)
       }
     } catch (e) {
@@ -626,7 +648,7 @@ function App() {
     if (!taskId) return
     console.log(`[restore] taskId=${taskId}, loading state from backend...`)
 
-    // 1. 拉任务详情（文案/改写稿/标题/赛道）
+    // 1. 拉任务详情（文案/改写稿/标题/赛道 + v9: 配图进度摘要）
     fetch(`${API_BASE}/api/tasks/${taskId}`)
       .then(r => r.json())
       .then((t: TaskDetail) => {
@@ -636,6 +658,31 @@ function App() {
         if (t.book_author) setBookAuthor(t.book_author)
         if (t.video_title) setVideoTitle(t.video_title)
         if (t.content_mode) setContentMode(t.content_mode as 'book' | 'general')
+        // v9: 恢复配图进度（刷新页面后状态不丢）
+        if (t.image_summary) {
+          setImageSummary(t.image_summary)
+          // 如果正在生成中，自动恢复轮询
+          if (t.image_summary.generating) {
+            setIsImageLoading(true)
+            setImageTotalExpected(t.image_summary.total)
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+            pollTimerRef.current = setInterval(async () => {
+              try {
+                const resp = await fetch(`${API_BASE}/api/images/${taskId}?_=${Date.now()}`)
+                if (!resp.ok) return
+                const data = await resp.json()
+                setImages(data.images || [])
+                if (data.image_summary) {
+                  setImageSummary(data.image_summary)
+                  if (data.image_summary.complete) {
+                    if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null }
+                    setIsImageLoading(false)
+                  }
+                }
+              } catch (_) {}
+            }, 2000)
+          }
+        }
       })
       .catch(e => console.error('[restore] task fetch failed:', e))
 
@@ -706,7 +753,7 @@ function App() {
               { step: 1, label: '文案导入', done: !!originalText },
               { step: 2, label: '文本清洗', done: !!rewrittenText },
               { step: 3, label: 'TTS 配音', done: segments.length > 0 && segments.some(s => s.status === 'success') },
-              { step: 4, label: '配图生成', done: images.length > 0 && images.some((i: any) => i.status === 'success') },
+              { step: 4, label: '配图生成', done: imageSummary?.complete === true },
               { step: 5, label: '视频合成', done: !!videoUrl },
             ].map((s, i, arr) => (
               <div key={s.step} className="flex items-center gap-2 flex-1 last:flex-none">
@@ -1389,10 +1436,13 @@ function App() {
             <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={handleGenerateImages}
-                disabled={!taskId || isImageLoading}
+                disabled={!taskId || isImageLoading || imageSummary?.generating === true}
+                title={imageSummary?.generating ? '配图正在生成中，请等待完成' : imageSummary?.complete ? '配图已完成，点击重新生成' : ''}
                 className="flex items-center gap-2 px-5 py-2 bg-purple-600 text-white font-medium rounded-xl hover:bg-purple-700 disabled:bg-purple-300 disabled:cursor-not-allowed transition-colors shadow-sm"
               >
-                {isImageLoading ? <><span>⏳</span><span>生成中...</span></> : <><span>🎨</span><span>生成全部配图（{selectedAspectRatio} 单图直生）</span></>}
+                {isImageLoading || imageSummary?.generating ? <><span>⏳</span><span>生成中...</span></>
+                  : imageSummary?.complete ? <><span>🔄</span><span>重新生成全部配图（{selectedAspectRatio} 单图直生）</span></>
+                  : <><span>🎨</span><span>生成全部配图（{selectedAspectRatio} 单图直生）</span></>}
               </button>
               <button
                 onClick={refreshImages}
@@ -1404,8 +1454,35 @@ function App() {
             </div>
           </div>
 
-          {/* 进度/消息 */}
-          {isImageLoading && (
+          {/* v9: 智能状态条（后端权威数据驱动） */}
+          {imageSummary?.generating && (
+            <div className="mb-4 px-4 py-3 bg-orange-50 border border-orange-300 rounded-xl flex items-center gap-3">
+              <span className="inline-block w-3 h-3 bg-orange-500 rounded-full animate-pulse" />
+              <span className="text-sm text-orange-700 font-medium">
+                🎨 正在生成配图…（{imageSummary.success}/{imageSummary.total}）
+              </span>
+              <span className="text-xs text-orange-500 ml-auto">请勿刷新页面，等待完成即可</span>
+            </div>
+          )}
+          {imageSummary?.complete && imageSummary.failed === 0 && (
+            <div className="mb-4 px-4 py-3 bg-green-50 border border-green-300 rounded-xl flex items-center gap-3">
+              <span className="text-lg">✅</span>
+              <span className="text-sm text-green-700 font-medium">
+                全部配图生成完成（{imageSummary.success}/{imageSummary.total}），可以合成视频了
+              </span>
+            </div>
+          )}
+          {imageSummary?.complete && imageSummary.failed > 0 && (
+            <div className="mb-4 px-4 py-3 bg-yellow-50 border border-yellow-300 rounded-xl flex items-center gap-3">
+              <span className="text-lg">⚠️</span>
+              <span className="text-sm text-yellow-700 font-medium">
+                配图生成完成（{imageSummary.success}/{imageSummary.total}，{imageSummary.failed} 张失败），
+                可点击失败图片单独重跑，或直接合成视频
+              </span>
+            </div>
+          )}
+          {/* 旧版进度提示（后端未返回 image_summary 时的兜底） */}
+          {isImageLoading && !imageSummary && (
             <div className="mb-4 px-4 py-3 bg-purple-50 border border-purple-200 rounded-xl flex items-center gap-3">
               <span className="inline-block w-3 h-3 bg-purple-500 rounded-full animate-pulse" />
               <span className="text-sm text-purple-700">配图生成中（单图逐张直出，已生成的可即时预览）...</span>
@@ -1414,7 +1491,7 @@ function App() {
               )}
             </div>
           )}
-          {imageMessage && !isImageLoading && (
+          {imageMessage && !isImageLoading && !imageSummary && (
             <div className={`mb-4 px-4 py-3 border rounded-xl text-sm ${
               imageMessage.includes('失败')
                 ? 'bg-red-50 border-red-200 text-red-700'
@@ -1601,10 +1678,10 @@ function App() {
             </div>
           )}
 
-          {images.length === 0 && !isImageLoading && (
+          {images.length === 0 && !isImageLoading && !imageSummary?.generating && (
             <div className="text-center py-8 text-gray-400 text-sm">
-              ↑ 选择风格后点击「生成全部配图」，按 9 句一组生成九宫格 → 裁切为独立分镜图<br />
-              10 分钟视频将生成约 63 张候选分镜图（每句 5~10 秒），彻底消灭静止 PPT
+              ↑ 选择风格后点击「生成全部配图」，逐句独立生成单张配图<br />
+              生成中可即时预览已完成图片，完成后按钮会自动亮起通知你合成
             </div>
           )}
         </section>
@@ -1636,13 +1713,33 @@ function App() {
                 <option value="card_bench">对标卡片 (深藏青 + 8:9 满宽大图)</option>
               </select>
             </div>
-            <button
-              onClick={handleComposeVideo}
-              disabled={!taskId || isVideoLoading}
-              className="flex items-center gap-2 px-5 py-2 bg-red-600 text-white font-medium rounded-xl hover:bg-red-700 disabled:bg-red-300 disabled:cursor-not-allowed transition-colors shadow-sm"
-            >
-              {isVideoLoading ? <><span>⏳</span><span>合成中...</span></> : <><span>🎬</span><span>合成最终成片</span></>}
-            </button>
+            {(() => {
+              const imagesReady = imageSummary?.complete === true
+              const imagesGenerating = imageSummary?.generating === true
+              const canCompose = imagesReady && !isVideoLoading && taskId
+              const btnTitle = !taskId ? '请先创建任务'
+                : imagesGenerating ? '配图生成中，请等待完成后再合成'
+                : !imagesReady ? '请先生成配图'
+                : ''
+              return (
+                <button
+                  onClick={handleComposeVideo}
+                  disabled={!canCompose}
+                  title={btnTitle}
+                  className={`flex items-center gap-2 px-5 py-2 text-white font-medium rounded-xl transition-colors shadow-sm ${
+                    canCompose
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  }`}
+                >
+                  {isVideoLoading ? <><span>⏳</span><span>合成中...</span></>
+                    : imagesGenerating ? <><span>🔒</span><span>等待配图完成</span></>
+                    : !imagesReady ? <><span>🔒</span><span>请先生成配图</span></>
+                    : <><span>🎬</span><span>合成最终成片</span></>
+                  }
+                </button>
+              )
+            })()}
             <button
               onClick={checkVideoStatus}
               disabled={!taskId}
@@ -1794,7 +1891,11 @@ function App() {
 
           {!videoUrl && !isVideoLoading && (
             <div className="text-center py-8 text-gray-400 text-sm">
-              ↑ 确认配图生成完成后，选择风格点击「合成最终成片」
+              {imageSummary?.complete
+                ? '↑ 配图已完成，选择风格点击「合成最终成片」'
+                : imageSummary?.generating
+                  ? '⏳ 配图生成中，完成后合成按钮将自动亮起'
+                  : '↑ 请先生成配图，完成后合成按钮会自动亮起'}
             </div>
           )}
         </section>

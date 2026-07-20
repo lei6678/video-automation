@@ -64,6 +64,7 @@ uvicorn main:app --reload       # 开发模式：仅 API，http://localhost:8000
 | `backend/prompts/rewrite_research.txt` | 研究模式 Prompt |
 | `backend/prompts/image_context.txt` | 配图视觉档案提取 Prompt |
 | `fonts/XianKai_Title.otf` | 思源宋体 Heavy（bench 卡片标题字体） |
+| `bgm/` | 全局背景音乐目录：放入任意音频文件即自动混入所有成片（循环铺底，25% 音量 ≈ 剪映 -12dB + 结尾淡出），清空则不加 BGM |
 | `团队每日操作指南.md` | 团队协作 SOP |
 
 ### 后端服务层 (`backend/services/`)

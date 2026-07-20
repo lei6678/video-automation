@@ -1320,8 +1320,29 @@ def concat_clips(clip_paths: list[str], output_path: str) -> bool:
 
 # ============== 音轨混流 ==============
 
+BGM_VOLUME = 0.25   # 背景音乐音量（0.25 ≈ -12dB，对齐同事剪映 -11.9dB 标准；人声保持 1.0）
+BGM_FADE_SEC = 3.0  # 背景音乐结尾淡出秒数
+
+
+def _find_bgm() -> str | None:
+    """
+    全局背景音乐：项目根目录 bgm/ 下按文件名排序取第一个音频文件。
+    目录不存在或为空 → None（不加背景音乐，行为同旧版）。
+    打包模式：bgm/ 在 exe 旁边，方便同事自行换歌。
+    """
+    from _resource import get_bgm_dir
+    bgm_dir = get_bgm_dir()
+    if not os.path.isdir(bgm_dir):
+        return None
+    for name in sorted(os.listdir(bgm_dir)):
+        if name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")):
+            return os.path.join(bgm_dir, name)
+    return None
+
+
 def mux_audio(video_path: str, audio_path: str, output_path: str) -> bool:
-    """将音频轨混入视频。视频比音频长 → 末尾静音；音频比视频长 → 截断音频。"""
+    """将音频轨混入视频。视频比音频长 → 末尾静音；音频比视频长 → 截断音频。
+    bgm/ 目录下有音频时自动循环铺底混入（音量 BGM_VOLUME，结尾淡出），失败回退纯人声。"""
     if not os.path.exists(video_path):
         print("[video:mux] 视频文件不存在")
         return False
@@ -1329,6 +1350,43 @@ def mux_audio(video_path: str, audio_path: str, output_path: str) -> bool:
         print("[video:mux] 音频文件不存在，输出无声视频")
         shutil.copy2(video_path, output_path)
         return True
+
+    bgm_path = _find_bgm()
+    if bgm_path:
+        # BGM 链：压音量 → 结尾淡出；amix duration=first 以人声长度为准，normalize=0 保持人声原音量
+        voice_dur = get_audio_duration(audio_path)
+        bg_chain = f"[2:a]volume={BGM_VOLUME}"
+        if voice_dur > BGM_FADE_SEC:
+            bg_chain += f",afade=t=out:st={voice_dur - BGM_FADE_SEC:.2f}:d={BGM_FADE_SEC}"
+        bg_chain += "[bg]"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-stream_loop", "-1",
+            "-i", bgm_path,
+            "-filter_complex",
+            f"{bg_chain};"
+            f"[1:a][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            "-map", "0:v:0",
+            "-map", "[aout]",
+            output_path,
+        ]
+        print(f"[video:mux] 混流视频 + 人声 + BGM({os.path.basename(bgm_path)}) → {output_path}")
+        try:
+            result = _run_ffmpeg(cmd, timeout=180, description="音轨混流（含BGM）")
+            if (result.returncode == 0
+                    and os.path.exists(output_path)
+                    and os.path.getsize(output_path) > 1000):
+                return True
+            err = (result.stderr or "")[-300:]
+            print(f"[video:mux] BGM 混流失败，回退纯人声混流: {err}")
+        except Exception as e:
+            print(f"[video:mux] BGM 混流异常，回退纯人声混流: {e}")
 
     cmd = [
         "ffmpeg", "-y",
@@ -2822,6 +2880,188 @@ async def compose_final_video_card_v6(
 
 # ============== v8 对标卡片模式：深藏青底 + 8:9 满宽大图 + 双色标题 ==============
 
+# ---- 版式常量（模块级，复用）----
+_BENCH_BG       = "#071730"
+_BENCH_WHITE    = "#FBFBF7"
+_BENCH_GOLD     = "#C9B38C"
+_BENCH_SLOGAN   = "#D9BB7A"
+_BENCH_SUB      = "#FEFEFC"
+_BENCH_DISC     = "#212C40"
+_BENCH_LINE_CLR = "0xE8E4D4"
+_BENCH_TITLE_FS  = 80
+_BENCH_SUB_FS    = 64
+_BENCH_SLOGAN_FS = 68
+_BENCH_DISC_FS   = 28
+_BENCH_TITLE1_Y  = 150
+_BENCH_TITLE2_Y  = 259
+_BENCH_IMG_Y     = 377
+_BENCH_IMG_H     = 1214
+_BENCH_LINE_H    = 4
+_BENCH_SUB_Y     = 377 + 1214 - 258 - 64   # 1269，字幕底边距图底 258px
+_BENCH_SLOGAN_Y  = 377 + 1214 + 4 + 56     # 1651
+_BENCH_DISC1_Y   = 1774
+_BENCH_DISC_PITCH = 36
+
+
+def _composite_bench_segment(
+    pure_clip_path: str,
+    output_path: str,
+    sentence_text: str,
+    duration_sec: float,
+    title_line1: str = "",
+    title_line2: str = "",
+    slogan: str = "- 品读传奇人生 -",
+    subtitle_line: str = "图片由AI生成与网络下载\n科普视频 无不良引导",
+    width: int = 1080,
+    height: int = 1920,
+    fps: int = 30,
+) -> bool:
+    """
+    v9 逐段复合（替代 v8 批量 filter_complex）。
+
+    将一段已生成好的纯画面 clip（1080×1214 Ken Burns）叠到藏青底 +
+    双色标题 + 细线 + 金色标语 + 免责 + 口播字幕，输出完整 1080×1920 片段。
+
+    逐段编码消除了原 v8 批量复合的 FFmpeg 崩溃风险（enable 窗口跨段计算溢出），
+    且在单段失败时可自动占位，保证 A/V 同步。
+    """
+    import os as _os
+
+    if not _os.path.exists(pure_clip_path):
+        print(f"[video:bench:seg] pure clip missing: {pure_clip_path}")
+        return False
+    if duration_sec <= 0:
+        return False
+
+    title_font = _find_title_font()
+
+    def _esc(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\").replace(":", "\\:")
+                .replace("'", "\\'").replace("%", "\\%")
+                .replace("{", "\\{").replace("}", "\\}")
+        )
+
+    # ---- filter_complex：bg → overlay pure → drawtext ----
+    dt_parts = []
+
+    # 细线（图片上 / 下）
+    dt_parts.append(
+        f"drawbox=x=0:y={_BENCH_IMG_Y - _BENCH_LINE_H}:w={width}:h={_BENCH_LINE_H}:"
+        f"color={_BENCH_LINE_CLR}@0.95:t=fill"
+    )
+    dt_parts.append(
+        f"drawbox=x=0:y={_BENCH_IMG_Y + _BENCH_IMG_H}:w={width}:h={_BENCH_LINE_H}:"
+        f"color={_BENCH_LINE_CLR}@0.95:t=fill"
+    )
+
+    # 双色标题
+    if title_line1.strip() and title_line2.strip():
+        dt_parts.append(
+            f"drawtext=fontfile='{title_font}':text='{_esc(title_line1.strip())}':"
+            f"fontcolor={_BENCH_WHITE}:fontsize={_BENCH_TITLE_FS}:"
+            f"x=(w-text_w)/2:y={_BENCH_TITLE1_Y}"
+        )
+        dt_parts.append(
+            f"drawtext=fontfile='{title_font}':text='{_esc(title_line2.strip())}':"
+            f"fontcolor={_BENCH_GOLD}:fontsize={_BENCH_TITLE_FS}:"
+            f"x=(w-text_w)/2:y={_BENCH_TITLE2_Y}"
+        )
+    elif title_line1.strip() or title_line2.strip():
+        single = (title_line1 or title_line2).strip()
+        single_y = (_BENCH_TITLE1_Y + _BENCH_TITLE2_Y) // 2
+        dt_parts.append(
+            f"drawtext=fontfile='{title_font}':text='{_esc(single)}':"
+            f"fontcolor={_BENCH_GOLD}:fontsize={_BENCH_TITLE_FS}:"
+            f"x=(w-text_w)/2:y={single_y}"
+        )
+
+    # 标语
+    if slogan.strip():
+        dt_parts.append(
+            f"drawtext=fontfile='{title_font}':text='{_esc(slogan.strip())}':"
+            f"fontcolor={_BENCH_SLOGAN}:fontsize={_BENCH_SLOGAN_FS}:"
+            f"x=(w-text_w)/2:y={_BENCH_SLOGAN_Y}"
+        )
+
+    # 免责
+    if subtitle_line.strip():
+        disc_lines = subtitle_line.replace("\\n", "\n").split("\n")
+        for dli, dline in enumerate(disc_lines[:2]):
+            if not dline.strip():
+                continue
+            dt_parts.append(
+                f"drawtext=fontfile='{title_font}':text='{_esc(dline.strip())}':"
+                f"fontcolor={_BENCH_DISC}:fontsize={_BENCH_DISC_FS}:"
+                f"x=(w-text_w)/2:y={_BENCH_DISC1_Y + dli * _BENCH_DISC_PITCH}"
+            )
+
+    # 口播字幕（单段，自然断句 + enable 窗口）
+    if sentence_text.strip():
+        phrases = _split_natural_phrases(sentence_text.strip(), max_chars=14)
+        phrase_cjk_counts = [_count_cjk(p) for p in phrases]
+        total_cjk = sum(phrase_cjk_counts)
+
+        t_cursor = 0.0
+        for pi, phrase in enumerate(phrases):
+            p_cjk = phrase_cjk_counts[pi]
+            p_dur = (p_cjk / total_cjk) * duration_sec if total_cjk > 0 else duration_sec / len(phrases)
+            p_dur = max(p_dur, 0.8)
+            p_end = duration_sec if pi == len(phrases) - 1 else t_cursor + p_dur
+            if p_end > duration_sec - 0.3:
+                p_end = duration_sec
+
+            display = _strip_subtitle_punct(phrase)
+            if display:
+                dt_parts.append(
+                    f"drawtext=fontfile='{title_font}':text='{_esc(display)}':"
+                    f"fontcolor={_BENCH_SUB}:fontsize={_BENCH_SUB_FS}:"
+                    f"x=(w-text_w)/2:y={_BENCH_SUB_Y}:"
+                    f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
+                    f"bordercolor=black@0.5:borderw=4:"
+                    f"enable='between(t,{t_cursor:.3f},{p_end:.3f})'"
+                )
+            t_cursor = p_end
+            if t_cursor >= duration_sec:
+                break
+
+    # 组装 filter_complex
+    chain = f"[bg][0:v]overlay=0:{_BENCH_IMG_Y}:shortest=1"
+    if dt_parts:
+        chain += "," + ",".join(dt_parts)
+    chain += ",format=yuv420p[outv]"
+
+    filter_complex = (
+        f"color=c={_BENCH_BG}:s={width}x{height}:d={duration_sec}:r={fps},"
+        f"format=yuv420p[bg];"
+        + chain
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", pure_clip_path,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        output_path,
+    ]
+
+    try:
+        result = _run_ffmpeg(cmd, timeout=120,
+                             description=f"bench composite seg {_os.path.basename(output_path)}")
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-400:]
+            print(f"[video:bench:seg] FFmpeg error: {stderr_tail}")
+            return False
+        return _os.path.exists(output_path) and _os.path.getsize(output_path) > 1000
+    except Exception as e:
+        print(f"[video:bench:seg] exception: {e}")
+        return False
+
 async def compose_final_video_card_bench(
     task_id: int,
     db,
@@ -2853,27 +3093,8 @@ async def compose_final_video_card_bench(
     └──────────────────────┘
     架构沿用 v6 骨肉分离：纯画面片段 → 分批全局 filter_complex。
     """
-    # ---- 实测版式常量（对标截图像素级测量值）----
-    BG_COLOR = "#071730"        # 深藏青背景
-    TITLE_WHITE = "#FBFBF7"     # 标题行1 米白
-    TITLE_GOLD = "#C9B38C"      # 标题行2 金
-    SLOGAN_GOLD = "#D9BB7A"     # 静态标语金
-    SUB_WHITE = "#FEFEFC"       # 口播字幕白（实测 254,254,252）
-    DISC_COLOR = "#212C40"      # 免责小字（实测 33,44,64，比背景略亮的低对比蓝灰）
-    LINE_COLOR = "0xE8E4D4"     # 图片上下浅白细线（实测暖白）
-    TITLE_FONT_SIZE = 80        # 实测字高 ~79px
-    SUB_FONT_SIZE = 64          # 口播字幕（实测字高 ~70px，留描边余量）
-    SLOGAN_FONT_SIZE = 68       # 静态标语（实测字高 ~72px）
-    DISC_FONT_SIZE = 28         # 免责小字（实测字高 ~32px）
-    TITLE1_Y = 150              # 标题行1 顶部
-    TITLE2_Y = TITLE1_Y + TITLE_FONT_SIZE + 29   # 259，实测行距 29
-    IMG_Y = TITLE2_Y + TITLE_FONT_SIZE + 38      # 377，实测标题→图 38px
-    IMG_W, IMG_H = width, 1214  # 8:9 满宽出血（实测 1080×1209；理论 1215 取偶数 1214，yuv420p 要求偶数）
-    LINE_H = 4                  # 细线厚度（实测 3~4px）
-    SUB_Y = IMG_Y + IMG_H - 258 - SUB_FONT_SIZE  # 1269，字幕叠在图内，底边距图底 258px（实测）
-    SLOGAN_Y = IMG_Y + IMG_H + LINE_H + 56       # 1651，实测细线→标语 56px
-    DISC1_Y = 1774              # 免责行1（按对标底边距等比锚定）
-    DISC_PITCH = 36             # 免责行距（实测节距 35）
+    # ---- 实测版式常量 ----  # v9: 静态常量移至模块级 _BENCH_*
+    IMG_W, IMG_H = width, 1214  # 8:9 满宽出血
 
     def _calc_max_zoom(dur: float) -> float:
         if dur < 5:     return 1.10
@@ -2933,203 +3154,68 @@ async def compose_final_video_card_bench(
     total_duration = sum(d for d in seg_durations if d >= 0.3)
 
     # =================================================================
-    # Step 2: 分批全局合成（背景 + 细线 + 标题 + 字幕）
+    # Step 2: 逐段复合（v9 替代 v8 批量 filter_complex）
     # =================================================================
-    BATCH_SIZE = 12
-    title_font = _find_title_font()
+    # v8 原方案将 12 段拼在一起用 filter_complex_script 做全局复合，
+    # 字幕 enable 窗口跨段计算在 FFmpeg 长滤镜链中易静默失败（返回 0
+    # 但无输出），导致 batch 丢失 → 最终成片时间轴断裂、音画不同步。
+    # v9 改为逐段独立复合：每段单独 background + overlay + drawtext，
+    # 单段失败自动占位保护 A/V 同步。
+    composite_clips = []
+    composite_success = 0
 
-    def _esc(text: str) -> str:
-        return (
-            text.replace("\\", "\\\\")
-                .replace(":", "\\:")
-                .replace("'", "\\'")
-                .replace("%", "\\%")
-                .replace("{", "\\{")
-                .replace("}", "\\}")
-        )
-
-    # ---- 静态图层（每批相同）：细线 + 双色标题 + 金色标语 + 免责小字 ----
-    static_filters = [
-        f"drawbox=x=0:y={IMG_Y - LINE_H}:w={width}:h={LINE_H}:color={LINE_COLOR}@0.95:t=fill",
-        f"drawbox=x=0:y={IMG_Y + IMG_H}:w={width}:h={LINE_H}:color={LINE_COLOR}@0.95:t=fill",
-    ]
-    if slogan.strip():
-        static_filters.append(
-            f"drawtext=fontfile='{title_font}':"
-            f"text='{_esc(slogan.strip())}':"
-            f"fontcolor={SLOGAN_GOLD}:fontsize={SLOGAN_FONT_SIZE}:"
-            f"x=(w-text_w)/2:y={SLOGAN_Y}"
-        )
-    if subtitle_line.strip():
-        # 兼容字面 \n 与真实换行两种传参
-        disc_lines = subtitle_line.replace("\\n", "\n").split("\n")
-        for dli, dline in enumerate(disc_lines[:2]):
-            if not dline.strip():
-                continue
-            static_filters.append(
-                f"drawtext=fontfile='{title_font}':"
-                f"text='{_esc(dline.strip())}':"
-                f"fontcolor={DISC_COLOR}:fontsize={DISC_FONT_SIZE}:"
-                f"x=(w-text_w)/2:y={DISC1_Y + dli * DISC_PITCH}"
-            )
-    if title_line1.strip() and title_line2.strip():
-        static_filters.append(
-            f"drawtext=fontfile='{title_font}':"
-            f"text='{_esc(title_line1.strip())}':"
-            f"fontcolor={TITLE_WHITE}:fontsize={TITLE_FONT_SIZE}:"
-            f"x=(w-text_w)/2:y={TITLE1_Y}"
-        )
-        static_filters.append(
-            f"drawtext=fontfile='{title_font}':"
-            f"text='{_esc(title_line2.strip())}':"
-            f"fontcolor={TITLE_GOLD}:fontsize={TITLE_FONT_SIZE}:"
-            f"x=(w-text_w)/2:y={TITLE2_Y}"
-        )
-    elif title_line1.strip() or title_line2.strip():
-        # 只有一行时：金色居中于标题区
-        single = (title_line1 or title_line2).strip()
-        single_y = (TITLE1_Y + TITLE2_Y) // 2
-        static_filters.append(
-            f"drawtext=fontfile='{title_font}':"
-            f"text='{_esc(single)}':"
-            f"fontcolor={TITLE_GOLD}:fontsize={TITLE_FONT_SIZE}:"
-            f"x=(w-text_w)/2:y={single_y}"
-        )
-
-    total_batches = (len(sentences) + BATCH_SIZE - 1) // BATCH_SIZE
-    batch_videos = []
-
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(sentences))
-        batch_sentences = sentences[batch_start:batch_end]
-        batch_durations = seg_durations[batch_start:batch_end]
-        batch_pure = [pure_clip_paths[i] for i in range(batch_start, batch_end)
-                      if i < len(pure_clip_paths)]
-
-        if not batch_pure:
-            print(f"[video:bench] Batch {batch_idx+1}/{total_batches} 无可用纯画面片段，跳过")
+    for i, (sentence, dur) in enumerate(zip(sentences, seg_durations)):
+        if dur < 0.3:
             continue
 
-        batch_middle = os.path.join(clips_dir, f"middle_batch_{batch_start:03d}.mp4")
-        if not concat_clips(batch_pure, batch_middle):
-            print(f"[video:bench] Batch {batch_idx+1}/{total_batches} 纯画面拼接失败，跳过")
+        pure_clip = pure_clip_paths[i] if i < len(pure_clip_paths) else None
+        if not pure_clip or not os.path.exists(pure_clip):
+            # 纯画面片段生成失败 → 占位
+            ph_path = os.path.join(clips_dir, f"full_{i:03d}_ph.mp4")
+            if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
+                                              label=f"bench full seg{i}"):
+                composite_clips.append(ph_path)
+                placeholder_count += 1
             continue
 
-        batch_dur = sum(d for d in batch_durations if d >= 0.3)
-
-        # ---- 口播字幕（v8 自然断句：标点停顿处切分，按字数比例分配时长）----
-        dt_list = list(static_filters)
-        batch_cumulative = 0.0
-        for sentence, dur in zip(batch_sentences, batch_durations):
-            if dur < 0.3 or not sentence.strip():
-                batch_cumulative += dur
-                continue
-
-            phrases = _split_natural_phrases(sentence.strip(), max_chars=14)
-            phrase_cjk_counts = [_count_cjk(p) for p in phrases]
-            total_cjk = sum(phrase_cjk_counts)
-
-            time_start = 0.0
-            for p_idx, phrase in enumerate(phrases):
-                p_cjk = phrase_cjk_counts[p_idx]
-                # 按 CJK 字符数比例分配显示时长，最少 0.8s，末段吃掉剩余时间
-                phrase_dur = (p_cjk / total_cjk) * dur if total_cjk > 0 else dur / len(phrases)
-                phrase_dur = max(phrase_dur, 0.8)
-                if p_idx == len(phrases) - 1:
-                    phrase_end = dur
-                else:
-                    phrase_end = time_start + phrase_dur
-                    if phrase_end > dur - 0.3:
-                        phrase_end = dur
-
-                g_start = batch_cumulative + time_start
-                g_end = batch_cumulative + phrase_end
-                display_text = _strip_subtitle_punct(phrase)
-                if display_text:
-                    dt_list.append(
-                        f"drawtext=fontfile='{title_font}':"
-                        f"text='{_esc(display_text)}':"
-                        f"fontcolor={SUB_WHITE}:fontsize={SUB_FONT_SIZE}:"
-                        f"x=(w-text_w)/2:y={SUB_Y}:"
-                        f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
-                        f"bordercolor=black@0.5:borderw=4:"
-                        f"enable='between(t,{g_start:.3f},{g_end:.3f})'"
-                    )
-                time_start = phrase_end
-                if time_start >= dur:
-                    break
-            batch_cumulative += dur
-
-        # ---- filter_complex：藏青底 → overlay 大图 → 细线/标题/字幕 ----
-        filter_parts = [
-            f"color=c={BG_COLOR}:s={width}x{height}:d={batch_dur}:r={fps},format=yuv420p[bg]",
-        ]
-        chain = f"[bg][0:v]overlay=0:{IMG_Y}:shortest=1"
-        if dt_list:
-            chain += "," + ",".join(dt_list)
-        chain += ",format=yuv420p[outv]"
-        filter_parts.append(chain)
-        filter_complex = ";".join(filter_parts)
-
-        filter_script_path = os.path.join(clips_dir, f"filter_batch_{batch_start:03d}.txt")
-        with open(filter_script_path, "w", encoding="utf-8") as f:
-            f.write(filter_complex)
-
-        batch_output = os.path.join(clips_dir, f"batch_{batch_start:03d}_bench.mp4")
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", batch_middle,
-            "-filter_complex_script", filter_script_path,
-            "-map", "[outv]",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-an",
-            batch_output,
-        ]
-
-        print(
-            f"[video:bench] Batch {batch_idx+1}/{total_batches}: "
-            f"段 {batch_start}-{batch_end-1}, {batch_dur:.1f}s, "
-            f"{len(dt_list)} 滤镜项"
+        comp_path = os.path.join(clips_dir, f"full_{i:03d}.mp4")
+        ok = _composite_bench_segment(
+            pure_clip_path=pure_clip,
+            output_path=comp_path,
+            sentence_text=sentence,
+            duration_sec=dur,
+            title_line1=title_line1,
+            title_line2=title_line2,
+            slogan=slogan,
+            subtitle_line=subtitle_line,
+            width=width,
+            height=height,
+            fps=fps,
         )
 
-        try:
-            result = _run_ffmpeg(cmd, timeout=300, description=f"card bench batch {batch_idx}")
-            for tmp in (filter_script_path, batch_middle):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
+        if ok:
+            composite_clips.append(comp_path)
+            composite_success += 1
+        else:
+            print(f"[video:bench] composite seg {i+1}/{len(sentences)} FAIL → 占位 {dur:.1f}s")
+            ph_path = os.path.join(clips_dir, f"full_{i:03d}_ph.mp4")
+            if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
+                                              label=f"bench full seg{i}"):
+                composite_clips.append(ph_path)
+                placeholder_count += 1
 
-            if result.returncode != 0:
-                stderr_tail = (result.stderr or "")[-500:]
-                print(f"[video:bench] Batch {batch_idx+1} FFmpeg 错误: {stderr_tail}")
-                continue
-            if os.path.exists(batch_output) and os.path.getsize(batch_output) > 1000:
-                batch_videos.append(batch_output)
-            else:
-                print(f"[video:bench] Batch {batch_idx+1} 输出文件异常")
-        except Exception as e:
-            for tmp in (filter_script_path, batch_middle):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-            print(f"[video:bench] Batch {batch_idx+1} 异常: {e}")
-            continue
+        if (i + 1) % 15 == 0 or i == len(sentences) - 1:
+            print(f"[video:bench] composite {i+1}/{len(sentences)} OK {composite_success}")
 
-    if not batch_videos:
-        return {"error": "所有批次复合均失败", "segment_count": success_count}
+    if not composite_clips:
+        return {"error": "所有片段复合失败", "segment_count": success_count}
 
-    # ---- 拼接所有批次 ----
+    # ---- 拼接所有复合片段 ----
     concat_path = os.path.join(task_dir, "concat_bench.mp4")
-    if not concat_clips(batch_videos, concat_path):
-        return {"error": "批次拼接失败", "segment_count": success_count}
+    if not concat_clips(composite_clips, concat_path):
+        return {"error": "片段拼接失败", "segment_count": success_count}
 
-    for bv in batch_videos:
+    for bv in composite_clips:
         try:
             os.remove(bv)
         except Exception:
