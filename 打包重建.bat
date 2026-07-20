@@ -45,7 +45,8 @@ if exist "backend\.env" (
 ) else (
     echo ⚠️  未找到 backend\.env，同事需自行创建
 )
-copy /Y "启动工作台.bat" "dist\VideoWorkstation\" >nul 2>&1
+:: ★ 注意：启动工作台已包含智能引导逻辑，打包后直接复制 dist 源文件而非项目根 bat
+copy /Y "dist_assets\启动工作台.bat" "dist\VideoWorkstation\" >nul 2>&1
 echo ✅ 启动工作台.bat 已复制
 if exist "backend\.env.example" (
     copy /Y "backend\.env.example" "dist\VideoWorkstation\.env.example" >nul 2>&1
