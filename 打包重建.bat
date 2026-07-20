@@ -38,6 +38,10 @@ if exist "backend\.env" (
 )
 copy /Y "启动工作台.bat" "dist\VideoWorkstation\" >nul 2>&1
 echo ✅ 启动工作台.bat 已复制
+if exist "backend\.env.example" (
+    copy /Y "backend\.env.example" "dist\VideoWorkstation\.env.example" >nul 2>&1
+    echo ✅ .env.example 模板已复制（给朋友用）
+)
 
 echo.
 echo ============================================
