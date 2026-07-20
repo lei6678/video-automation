@@ -111,7 +111,7 @@ async def cors_preflight_middleware(request: Request, call_next):
 @app.get("/")
 async def root():
     """首页：有前端构建产物时返回工作台页面，否则返回 API 状态"""
-    dist_index = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist", "index.html")
+    dist_index = os.path.join(get_project_root(), "frontend", "dist", "index.html")
     if os.path.exists(dist_index):
         from fastapi.responses import FileResponse
         return FileResponse(dist_index, media_type="text/html")
@@ -2139,7 +2139,7 @@ async def download_subtitles(task_id: int, format: str = "srt"):
 # ============== 前端静态托管（v9：局域网单端口部署）==============
 # 挂在所有 API 路由之后：/api /audio /images /video /docs 优先命中，
 # 其余路径由前端 SPA 接管。frontend/dist 不存在时跳过（纯开发模式）。
-_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+_FRONTEND_DIST = os.path.join(get_project_root(), "frontend", "dist")
 if os.path.isdir(_FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=_FRONTEND_DIST, html=True), name="frontend")
     print(f"[main] 前端已托管: {os.path.abspath(_FRONTEND_DIST)} → http://<本机>:8000/")
