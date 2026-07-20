@@ -46,3 +46,6 @@ bgm/*.m4a
 bgm/*.aac
 bgm/*.flac
 bgm/*.ogg
+
+# 二进制工具（体积大，本地维护）
+bin/ffmpeg.exe

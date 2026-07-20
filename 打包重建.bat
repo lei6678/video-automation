@@ -10,6 +10,15 @@ echo   同事只需要 dist\VideoWorkstation\ 文件夹
 echo ============================================
 echo.
 
+echo [0/3] 检查 FFmpeg 依赖...
+if not exist "bin\ffmpeg.exe" (
+    echo ⚠️  未找到 bin\ffmpeg.exe，请先从 D:\ffmpeg 或其他位置复制到 bin\
+    pause
+    exit /b 1
+)
+echo ✅ FFmpeg 已就绪
+echo.
+
 echo [1/3] PyInstaller 打包...
 pyinstaller VideoWorkstation.spec
 if %errorlevel% neq 0 (

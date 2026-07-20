@@ -12,6 +12,18 @@ from fastapi import FastAPI, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
+
+# ★ 打包模式：将 exe 目录及 _internal 子目录加入 PATH，确保 subprocess 能找到捆绑的 ffmpeg.exe
+_SYS = __import__("sys")
+if getattr(_SYS, "frozen", False):
+    _exe_dir = os.path.dirname(_SYS.executable)
+    _internal_dir = os.path.join(_exe_dir, "_internal")
+    _current_path = os.environ.get("PATH", "")
+    for _d in (_internal_dir, _exe_dir):
+        if os.path.isdir(_d) and _d not in _current_path:
+            os.environ["PATH"] = _d + os.pathsep + _current_path
+            _current_path = os.environ["PATH"]  # 更新，避免重复添加
+
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -1900,7 +1912,13 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
     if primary and "error" not in primary and primary.get("video_path"):
         try:
             import shutil as _shutil
-            out_dir = os.getenv("FINAL_OUTPUT_DIR", r"E:\成片输出")
+            out_dir = os.getenv("FINAL_OUTPUT_DIR", "")
+            if not out_dir:
+                import sys as _out_sys
+                if getattr(_out_sys, 'frozen', False):
+                    out_dir = _os.path.join(os.path.dirname(_out_sys.executable), "成片输出")
+                else:
+                    out_dir = r"E:\成片输出"
             _os.makedirs(out_dir, exist_ok=True)
             safe_title = (request.video_title or task.book_title or f"task{task_id}").strip()
             for bad in '<>:"/\\|?*\n\r\t':
@@ -2046,7 +2064,13 @@ async def get_video_styles():
 @app.post("/api/open-output-dir")
 async def open_output_dir():
     """在服务器本机打开成品库文件夹（仅主机浏览器点击有意义，远程同事请用下载按钮）"""
-    out_dir = os.getenv("FINAL_OUTPUT_DIR", r"E:\成片输出")
+    out_dir = os.getenv("FINAL_OUTPUT_DIR", "")
+    if not out_dir:
+        import sys as _out_sys2
+        if getattr(_out_sys2, 'frozen', False):
+            out_dir = os.path.join(os.path.dirname(_out_sys2.executable), "成片输出")
+        else:
+            out_dir = r"E:\成片输出"
     os.makedirs(out_dir, exist_ok=True)
     try:
         os.startfile(out_dir)  # Windows 资源管理器打开

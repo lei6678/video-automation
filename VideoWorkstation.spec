@@ -11,7 +11,7 @@ datas += copy_metadata('imageio')
 a = Analysis(
     ['backend\\main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('bin/ffmpeg.exe', '.')],
     datas=datas,
     hiddenimports=[
         'sqlalchemy.ext.asyncio',
