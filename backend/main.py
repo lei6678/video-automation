@@ -1667,14 +1667,27 @@ def _count_cjk_local(text: str) -> int:
 
 
 def _split_title_local(title: str, max_chars: int = 16) -> list[str]:
-    """将标题在中点附近的空格/标点处自然断行，不动原文一个字。"""
+    """将标题自然断行为两行，不动原文一个字。
+
+    策略（优先级递减）：
+    1. 全文找第一个逗号/分号 → 天然语义断点，直接一刀
+    2. 无逗号 → 中点 ±1/4 范围找标点
+    3. 无标点 → 不拆分
+    """
     cjk = _count_cjk_local(title)
     if cjk <= max_chars:
         return [title]
+
+    # 策略1：优先在逗号/分号处断句（最自然的语义边界）
+    for bp in ("，", "；", "。", "：", "！", "？"):
+        pos = title.find(bp)
+        if pos > 2 and pos < len(title) - 4:
+            return [title[:pos + 1], title[pos + 1:].lstrip()]
+
+    # 策略2：中点附近找标点
     mid = len(title) // 2
     best = mid
-    for bp in " 　，,。；;、-—":
-        # 只搜中间 ±1/4 范围
+    for bp in " 　,、-—":
         lo = max(0, mid - len(title) // 4)
         hi = min(len(title), mid + len(title) // 4)
         pos = title.find(bp, lo, hi)
