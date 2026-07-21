@@ -117,7 +117,12 @@ def _find_chinese_font() -> str:
 
 
 def _find_handwriting_font() -> str:
-    """查找系统可用的书法/楷体字体（用于底部标语）。"""
+    """查找系统可用的书法/行楷字体（用于底部标语）。优先项目内钟齐志莽行书。"""
+    from _resource import get_project_root
+    project_font = os.path.join(get_project_root(), "fonts", "钟齐志莽行书.ttf")
+    if os.path.exists(project_font):
+        return project_font.replace("\\", "/").replace(":", "\\:")
+    # 降级：系统楷体/行楷
     candidates = [
         "C:/Windows/Fonts/simkai.ttf",       # 楷体
         "C:/Windows/Fonts/STKAITI.TTF",       # 华文楷体
@@ -2875,6 +2880,24 @@ def _composite_bench_segment(
                 .replace("{", "\\{").replace("}", "\\}")
         )
 
+    # ★ 标题宽度自适应：检测文本是否超出画布，超出时自动缩小字号
+    H_MARGIN = 80  # 左右各 40px 呼吸空间
+    max_text_width = width - H_MARGIN
+
+    def _fit_title_fs(text: str, max_fs: int = _BENCH_TITLE_FS, min_fs: int = 40) -> int:
+        """根据文本 CJK 字符数计算不溢出的最佳字号（每字 ≈ 字号 px 宽）"""
+        cjk = _count_cjk(text)
+        if cjk == 0:
+            return max_fs
+        fitted = int(max_text_width / cjk)
+        fitted = max(min_fs, min(max_fs, fitted))
+        return fitted
+
+    t1_fs = _fit_title_fs(title_line1.strip()) if title_line1.strip() else _BENCH_TITLE_FS
+    t2_fs = _fit_title_fs(title_line2.strip()) if title_line2.strip() else _BENCH_TITLE_FS
+    # 两行统一取较小字号，保持视觉一致
+    title_fs = min(t1_fs, t2_fs) if (title_line1.strip() or title_line2.strip()) else _BENCH_TITLE_FS
+
     # ---- filter_complex：bg → overlay pure → drawtext ----
     dt_parts = []
 
@@ -2888,16 +2911,16 @@ def _composite_bench_segment(
         f"color={_BENCH_LINE_CLR}@0.95:t=fill"
     )
 
-    # 双色标题
+    # 双色标题（字号自适应：过长文本自动缩小到不溢出）
     if title_line1.strip() and title_line2.strip():
         dt_parts.append(
             f"drawtext=fontfile='{title_font}':text='{_esc(title_line1.strip())}':"
-            f"fontcolor={_BENCH_WHITE}:fontsize={_BENCH_TITLE_FS}:"
+            f"fontcolor={_BENCH_WHITE}:fontsize={title_fs}:"
             f"x=(w-text_w)/2:y={_BENCH_TITLE1_Y}"
         )
         dt_parts.append(
             f"drawtext=fontfile='{title_font}':text='{_esc(title_line2.strip())}':"
-            f"fontcolor={_BENCH_GOLD}:fontsize={_BENCH_TITLE_FS}:"
+            f"fontcolor={_BENCH_GOLD}:fontsize={title_fs}:"
             f"x=(w-text_w)/2:y={_BENCH_TITLE2_Y}"
         )
     elif title_line1.strip() or title_line2.strip():
@@ -2905,7 +2928,7 @@ def _composite_bench_segment(
         single_y = (_BENCH_TITLE1_Y + _BENCH_TITLE2_Y) // 2
         dt_parts.append(
             f"drawtext=fontfile='{title_font}':text='{_esc(single)}':"
-            f"fontcolor={_BENCH_GOLD}:fontsize={_BENCH_TITLE_FS}:"
+            f"fontcolor={_BENCH_GOLD}:fontsize={title_fs}:"
             f"x=(w-text_w)/2:y={single_y}"
         )
 
