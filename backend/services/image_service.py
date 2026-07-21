@@ -64,6 +64,14 @@ STYLE_BIBLES = {
         "场景：海边独行、山顶远眺、城市天台、空旷图书馆。"
         "传达人生感悟、认知成长的深邃感。"
     ),
+    "documentary_realism": (
+        "纪实摄影风，拒绝美化贫困与苦难。"
+        "冷灰主色调，低饱和、低曝光、暗调阴影，硬侧光或阴天散射光。"
+        "粗粝质感，不完美构图，允许破旧的墙壁、斑驳的地面、磨损的衣物、简陋的家具。"
+        "场景真实破败但不过度渲染：老式平房、水泥地面铁管床、旧棉被堆叠、煤炉取暖、昏黄灯泡、开裂的木桌。"
+        "拒绝暖色滤镜、拒绝日系小清新、拒绝温馨柔光——这不是向往的生活，这是需要逃离的处境。"
+        "人物表情克制但疲惫，肢体语言传达压抑与坚韧并存。"
+    ),
 }
 
 # ============== 风格后缀映射（注入 Fal.ai prompt 末端）==============
@@ -73,6 +81,7 @@ STYLE_PROMPT_MAP = {
     "warm_book": ", warm pastel colors, soft morning sunlight, cozy atmosphere, studio Ghibli aesthetic style",
     "clean_health": ", bright natural lighting, clean minimalism, vibrant colors, commercial photography",
     "philosophy": ", moody dramatic lighting, melancholic low key tone, surrealism artistic texture",
+    "documentary_realism": ", gritty documentary photography, desaturated cold tones, harsh shadows, unpolished realism, reportage style, no glamour no beauty filter",
 }
 
 # ============== 画面后置防线（防崩坏补丁）==============
@@ -335,6 +344,83 @@ def _build_generic_prompt(
 
 请生成一张意境配图。不要加任何文字。"""
     return prompt
+
+
+# ============== 情绪检测 → 自动匹配风格 ==============
+
+# 情绪关键词 → 最适合的 Style Bible
+_MOOD_STYLE_MAP: dict[str, str] = {
+    "documentary_realism": "documentary_realism",
+    "warm_book": "warm_book",
+    "philosophy": "philosophy",
+    "default": "default",
+}
+
+# 负面/苦难情绪关键词（触发纪实风）
+_TRAGIC_KEYWORDS = [
+    "贫困", "贫穷", "穷困", "苦难", "悲惨", "凄惨", "惨烈",
+    "绝望", "压抑", "沉重", "悲痛", "悲恸", "哀伤", "哭泣",
+    "饥饿", "流浪", "逃荒", "乞讨", "捡破烂",
+    "家徒四壁", "一贫如洗", "揭不开锅", "饿死", "冻死",
+    "虐待", "抛弃", "遗弃", "父亲疯了", "母亲跑了",
+    "孤儿", "无家可归", "流浪儿", "留守儿童",
+    "阴暗", "灰暗", "昏暗", "破败", "残破", "破旧不堪",
+    "挣扎", "煎熬", "苟活", "活不下去", "生不如死",
+    "患病", "病重", "绝症", "临终",
+]
+
+# 温暖/治愈情绪关键词（触发书单风）
+_WARM_KEYWORDS = [
+    "温暖", "治愈", "幸福", "美好", "甜蜜", "温馨",
+    "阳光", "明媚", "欢快", "轻松", "悠闲",
+    "田园", "花海", "森林", "海边漫步", "落日",
+    "团圆", "和睦", "和谐", "宁静", "安详",
+]
+
+# 哲思/深沉情绪关键词（触发哲学风）
+_PHILOSOPHY_KEYWORDS = [
+    "哲学", "思辨", "孤独", "深邃", "广阔", "渺小",
+    "人生", "命运", "时间", "永恒", "反思", "冥想",
+    "宇宙", "星空", "山川", "大海", "荒原",
+]
+
+
+def _detect_sentence_mood(
+    sentence: str,
+    visual_context: str = "",
+) -> str:
+    """
+    根据句子文本和视觉档案的情绪基调，自动选择最匹配的 Style Bible。
+    返回风格 key: "documentary_realism" | "warm_book" | "philosophy" | "default"
+    """
+    combined = f"{visual_context}\n{sentence}"
+
+    tragic_score = sum(1 for kw in _TRAGIC_KEYWORDS if kw in combined)
+    warm_score = sum(1 for kw in _WARM_KEYWORDS if kw in combined)
+    philo_score = sum(1 for kw in _PHILOSOPHY_KEYWORDS if kw in combined)
+
+    # 优先匹配最强的情绪信号
+    if tragic_score >= warm_score and tragic_score >= philo_score and tragic_score > 0:
+        return "documentary_realism"
+    if warm_score >= tragic_score and warm_score >= philo_score and warm_score > 0:
+        return "warm_book"
+    if philo_score >= tragic_score and philo_score >= warm_score and philo_score > 0:
+        return "philosophy"
+
+    # 无强信号 → 从 visual_context 提取情绪基调
+    if visual_context:
+        mood_match = re.search(r'情绪基调[：:]\s*(.*)', visual_context, re.IGNORECASE)
+        if mood_match:
+            mood_text = mood_match.group(1).strip()
+            # 解析情绪基调中的关键词
+            tragic_in_context = any(kw in mood_text for kw in _TRAGIC_KEYWORDS)
+            warm_in_context = any(kw in mood_text for kw in _WARM_KEYWORDS)
+            if tragic_in_context:
+                return "documentary_realism"
+            if warm_in_context:
+                return "warm_book"
+
+    return "default"
 
 
 # ============== 单图直生 Prompt（v4：单句独立生图，彻底废弃九宫格）==============
@@ -709,6 +795,15 @@ async def generate_all_images(
                 f"{text_len} 字, size={REQUEST_W}x{REQUEST_H}, aspect={aspect_ratio}"
             )
 
+            # ★ 情绪检测：自动匹配最贴合文案氛围的 Style Bible
+            sentence_style = _detect_sentence_mood(sentence, visual_context)
+            if sentence_style != "default":
+                actual_style_bible = STYLE_BIBLES.get(sentence_style, style_bible)
+                actual_style_suffix = STYLE_PROMPT_MAP.get(sentence_style, STYLE_PROMPT_MAP["default"])
+            else:
+                actual_style_bible = style_bible
+                actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
+
             # 构建 Prompt
             base_prompt = build_single_segment_prompt(
                 text=sentence,
@@ -716,12 +811,11 @@ async def generate_all_images(
                 book_author=book_author,
                 segment_index=seg_idx,
                 total_segments=total_segments,
-                style_bible=style_bible,
+                style_bible=actual_style_bible,
                 aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
             )
-            style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
-            final_prompt = base_prompt + style_suffix + SAFETY_SUFFIX
+            final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
             # 保存 prompt 到文件
             prompt_path = os.path.join(images_dir, f"seg_{seg_idx:03d}_prompt.txt")
@@ -765,11 +859,11 @@ async def generate_all_images(
                                 book_author=book_author,
                                 segment_index=seg_idx,
                                 total_segments=total_segments,
-                                style_bible=style_bible,
+                                style_bible=actual_style_bible,
                                 aspect_ratio=aspect_ratio,
                                 visual_context=visual_context,
                             )
-                            llm_prompt = llm_base + style_suffix + SAFETY_SUFFIX
+                            llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
                             print(f"[image:v4] 段 {seg_idx + 1} LLM 改写完成 → 重试 Fal.ai")
                             b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
                             if b64:
@@ -782,10 +876,10 @@ async def generate_all_images(
                         generic = _build_generic_prompt(
                             book_title=book_title, book_author=book_author,
                             segment_index=seg_idx, total_segments=total_segments,
-                            style_bible=style_bible, aspect_ratio=aspect_ratio,
+                            style_bible=actual_style_bible, aspect_ratio=aspect_ratio,
                             visual_context=visual_context,
                         )
-                        generic += style_suffix + SAFETY_SUFFIX
+                        generic += actual_style_suffix + SAFETY_SUFFIX
                         print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → 通用 prompt 兜底")
                         b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
                         if b64:
@@ -1008,6 +1102,15 @@ async def regenerate_single_image(
         REQUEST_W, REQUEST_H = 2160, 3840
         TARGET_W, TARGET_H = 1080, 1920
 
+    # ★ 情绪检测：自动匹配最贴合文案氛围的 Style Bible
+    sentence_style = _detect_sentence_mood(text, visual_context)
+    if sentence_style != "default":
+        actual_style_bible = STYLE_BIBLES.get(sentence_style, style_bible)
+        actual_style_suffix = STYLE_PROMPT_MAP.get(sentence_style, STYLE_PROMPT_MAP["default"])
+    else:
+        actual_style_bible = style_bible
+        actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
+
     # 构建 Prompt + 视觉档案 + 风格后缀 + 安全补丁
     base_prompt = build_single_segment_prompt(
         text=text,
@@ -1015,12 +1118,11 @@ async def regenerate_single_image(
         book_author=book_author,
         segment_index=segment_index,
         total_segments=len(sentences),
-        style_bible=style_bible,
+        style_bible=actual_style_bible,
         aspect_ratio=aspect_ratio,
         visual_context=visual_context,
     )
-    style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
-    prompt = base_prompt + style_suffix + SAFETY_SUFFIX
+    prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
     print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
 
@@ -1052,11 +1154,11 @@ async def regenerate_single_image(
                     book_author=book_author,
                     segment_index=segment_index,
                     total_segments=len(sentences),
-                    style_bible=style_bible,
+                    style_bible=actual_style_bible,
                     aspect_ratio=aspect_ratio,
                     visual_context=visual_context,
                 )
-                llm_prompt = llm_base + style_suffix + SAFETY_SUFFIX
+                llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
                 print(f"[image:single] LLM 改写完成 → 重试 Fal.ai")
                 b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
                 if b64:
@@ -1068,10 +1170,10 @@ async def regenerate_single_image(
             generic = _build_generic_prompt(
                 book_title=book_title, book_author=book_author,
                 segment_index=segment_index, total_segments=len(sentences),
-                style_bible=style_bible, aspect_ratio=aspect_ratio,
+                style_bible=actual_style_bible, aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
             )
-            generic += style_suffix + SAFETY_SUFFIX
+            generic += actual_style_suffix + SAFETY_SUFFIX
             print(f"[image:single] 降敏仍失败 → 通用 prompt 兜底")
             b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
             if b64:

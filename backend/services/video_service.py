@@ -97,9 +97,8 @@ def _find_title_font() -> str:
     对标卡片模式标题/字幕字体：优先项目内思源宋体 Heavy（fonts/XianKai_Title.otf），
     缺失时降级楷体系。返回 FFmpeg drawtext 转义路径。
     """
-    project_font = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "fonts", "XianKai_Title.otf")
-    )
+    from _resource import get_project_root
+    project_font = os.path.join(get_project_root(), "fonts", "XianKai_Title.otf")
     if os.path.exists(project_font):
         return project_font.replace("\\", "/").replace(":", "\\:")
     return _find_handwriting_font()
@@ -1330,7 +1329,7 @@ def _find_bgm() -> str | None:
     目录不存在或为空 → None（不加背景音乐，行为同旧版）。
     打包模式：bgm/ 在 exe 旁边，方便同事自行换歌。
     """
-    from _resource import get_bgm_dir
+    from _resource import get_bgm_dir, get_project_root
     bgm_dir = get_bgm_dir()
     if not os.path.isdir(bgm_dir):
         return None
@@ -2934,6 +2933,7 @@ def _composite_bench_segment(
         return False
 
     title_font = _find_title_font()
+    slogan_font = _find_handwriting_font()  # 标语用行楷/手写体，对齐对标成片风格
 
     def _esc(text: str) -> str:
         return (
@@ -2976,10 +2976,10 @@ def _composite_bench_segment(
             f"x=(w-text_w)/2:y={single_y}"
         )
 
-    # 标语
+    # 标语（行楷/手写体）
     if slogan.strip():
         dt_parts.append(
-            f"drawtext=fontfile='{title_font}':text='{_esc(slogan.strip())}':"
+            f"drawtext=fontfile='{slogan_font}':text='{_esc(slogan.strip())}':"
             f"fontcolor={_BENCH_SLOGAN}:fontsize={_BENCH_SLOGAN_FS}:"
             f"x=(w-text_w)/2:y={_BENCH_SLOGAN_Y}"
         )

@@ -1659,6 +1659,33 @@ async def get_images(task_id: int, db: Session = Depends(get_db)):
     )
 
 
+# ============== 本地标题断行（避免 AI 擅自改写）==============
+
+def _count_cjk_local(text: str) -> int:
+    import re
+    return len(re.findall(r'[一-鿿]', text))
+
+
+def _split_title_local(title: str, max_chars: int = 16) -> list[str]:
+    """将标题在中点附近的空格/标点处自然断行，不动原文一个字。"""
+    cjk = _count_cjk_local(title)
+    if cjk <= max_chars:
+        return [title]
+    mid = len(title) // 2
+    best = mid
+    for bp in " 　，,。；;、-—":
+        # 只搜中间 ±1/4 范围
+        lo = max(0, mid - len(title) // 4)
+        hi = min(len(title), mid + len(title) // 4)
+        pos = title.find(bp, lo, hi)
+        if pos != -1:
+            best = pos + 1
+            break
+    if best == mid or best >= len(title) or best <= 2:
+        return [title]
+    return [title[:best], title[best:].lstrip()]
+
+
 # ============== Step 05：视频合成 ==============
 
 @app.post("/api/video/compose", response_model=ComposeVideoResponse)
@@ -1863,14 +1890,22 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         if not (t1 or t2):
             raw_title = request.video_title or request.title or task.book_title or ""
             if raw_title:
-                from services.llm_service import split_title_two_lines
-                split = await split_title_two_lines(
-                    raw_title,
-                    book_title=task.book_title or "",
-                    book_author=task.book_author or "",
-                )
-                t1 = split.get("line1", "")
-                t2 = split.get("line2", "")
+                import re as _title_re
+                cjk_count = len(_title_re.findall(r'[一-鿿]', raw_title))
+                if cjk_count <= 16:
+                    # 短标题：本地断行，不调 AI（避免 AI 擅自提炼改写）
+                    lines = _split_title_local(raw_title, max_chars=16)
+                    t1 = lines[0] if len(lines) > 1 else ""
+                    t2 = lines[-1]
+                else:
+                    from services.llm_service import split_title_two_lines
+                    split = await split_title_two_lines(
+                        raw_title,
+                        book_title=task.book_title or "",
+                        book_author=task.book_author or "",
+                    )
+                    t1 = split.get("line1", "")
+                    t2 = split.get("line2", "")
         result_bench = await compose_final_video_card_bench(
             task_id=task_id,
             db=db,

@@ -49,3 +49,6 @@ bgm/*.ogg
 
 # 二进制工具（体积大，本地维护）
 bin/ffmpeg.exe
+
+# 分发压缩包（体积大，本地生成）
+VideoWorkstation_*.zip
