@@ -52,164 +52,43 @@ def _run_ffmpeg(cmd: list[str], timeout: int = 180, description: str = "") -> su
         raise
 
 
-# ============== PIL 逐帧渲染（v10：替代 FFmpeg zoompan，零抖动 + 缓入动效）==============
+# ============== v10.1 Ken Burns 数学工具（FFmpeg zoompan 4x 超采样，零抖动 + 缓入）==============
 
-def _smoothstep(t: float) -> float:
-    """Smoothstep 缓入缓出曲线：开头慢慢弹入，中段自然加速，结尾平滑过渡。"""
-    t = max(0.0, min(1.0, t))
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _render_pil_ken_burns(
-    image_path: str,
-    output_path: str,
-    duration_sec: float,
-    fps: int = 30,
-    width: int = 1080,
-    height: int = 1920,
-    max_zoom: float = 1.06,
-    pan_pct: float = 0.03,
-) -> bool:
+def _build_zoompan_z_expr(total_frames: int, max_zoom: float) -> str:
     """
-    PIL + FFmpeg 逐帧 Ken Burns 渲染（零抖动、smoothstep 缓入）。
+    FFmpeg zoompan z 表达式：smoothstep 缓入曲线。
 
-    用 PIL LANCZOS 逐帧计算真正子像素精度的裁剪+缩放，
-    通过 rawvideo 管道喂给 FFmpeg 编码为 mp4。
-
-    Args:
-        image_path: 输入图片路径
-        output_path: 输出 MP4 路径
-        duration_sec: 片段时长
-        fps: 帧率
-        width / height: 输出分辨率
-        max_zoom: 最终缩放倍率（1.00 → max_zoom）
-        pan_pct: 水平左移量（占原图宽度的比例，默认 3%）
+    smoothstep(t) = 3t² - 2t³  (t = on / total_frames)
+    曲线从 0 开始慢慢爬升 → 中段自然加速 → 结尾平滑过渡。
+    相比线性 zoom，画面从静止「弹入」而非突然开始缩放。
     """
-    from PIL import Image as PILImage
+    if total_frames <= 0:
+        return "1.0"
+    delta = max_zoom - 1.0
+    N = total_frames
+    # if(gt(on,0), ...) 避免 on=0 时除以零和 pow 异常
+    return (
+        f"if(gt(on,0),"
+        f"1.0+{delta:.4f}*("
+        f"3*pow(on/{N},2)"
+        f"-2*pow(on/{N},3)"
+        f"),1.0)"
+    )
 
-    if not os.path.exists(image_path):
-        print(f"[video:pil] 图片不存在: {image_path}")
-        return False
-    if duration_sec <= 0:
-        print(f"[video:pil] 时长无效 {duration_sec}s")
-        return False
 
-    total_frames = max(1, int(duration_sec * fps))
+def _build_zoompan_x_expr(total_frames: int, pan_pct: float = 0.03) -> str:
+    """
+    FFmpeg zoompan x 表达式：居中 + 平缓左移。
 
-    # ---- 加载并预缩放（预留 zoom + pan 余量）----
-    img = PILImage.open(image_path).convert("RGB")
-    img_w, img_h = img.size
-
-    # 目标宽高比
-    target_aspect = width / height
-    # 按目标分辨率等比放大到能覆盖 (max_zoom + pan 余量)
-    margin = max_zoom * (1.0 + pan_pct * 2.0)
-    if (img_w / img_h) >= target_aspect:
-        # 宽图：按高度缩放
-        scale_h = int(height * margin)
-        scale_w = int(scale_h * img_w / img_h)
-    else:
-        # 高图：按宽度缩放
-        scale_w = int(width * margin)
-        scale_h = int(scale_w * img_h / img_w)
-    scale_w = max(scale_w, width + 4)
-    scale_h = max(scale_h, height + 4)
-
-    img = img.resize((scale_w, scale_h), PILImage.LANCZOS)
-    scaled_w, scaled_h = img.size
-
-    # 总左移像素量
-    pan_px_total = scaled_w * pan_pct
-
-    # ---- 逐帧渲染 → FFmpeg stdin ----
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{width}x{height}",
-        "-pix_fmt", "rgb24",
-        "-r", str(fps),
-        "-i", "-",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-an",
-        output_path,
-    ]
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except Exception as e:
-        print(f"[video:pil] FFmpeg 启动失败: {e}")
-        return False
-
-    bytes_per_frame = width * height * 3
-    try:
-        for fn in range(total_frames):
-            progress = fn / total_frames if total_frames > 1 else 1.0
-            eased = _smoothstep(progress)
-            current_zoom = 1.0 + (max_zoom - 1.0) * eased
-
-            # 当前缩放级别下的可见区域（缩放坐标）
-            vis_w = scaled_w / current_zoom
-            vis_h = scaled_h / current_zoom
-
-            # 居中 → 缓慢左移
-            center_x = scaled_w / 2.0
-            center_y = scaled_h / 2.0
-            crop_x = center_x - vis_w / 2.0 - pan_px_total * progress
-            crop_y = center_y - vis_h / 2.0
-
-            # 防越界
-            crop_x = max(0.0, min(crop_x, scaled_w - vis_w))
-            crop_y = max(0.0, min(crop_y, scaled_h - vis_h))
-
-            # 裁剪 + 缩放到目标分辨率
-            crop_box = (crop_x, crop_y, crop_x + vis_w, crop_y + vis_h)
-            frame = img.crop(crop_box).resize((width, height), PILImage.LANCZOS)
-            proc.stdin.write(frame.tobytes())
-
-        proc.stdin.close()
-        ret = proc.wait(timeout=300)
-
-        if ret != 0:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-300:]
-            print(f"[video:pil] FFmpeg 编码失败 (exit={ret}): {stderr}")
-            return False
-
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print(
-                f"[video:pil] {duration_sec:.1f}s, {total_frames}frames, "
-                f"zoom: 1.00→{max_zoom:.2f}(eased), pan: {pan_px_total:.0f}px"
-            )
-            return True
-        return False
-
-    except (BrokenPipeError, OSError) as e:
-        # 尝试读取 stderr 获取更有意义的错误信息
-        try:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-400:]
-        except Exception:
-            stderr = "(unavailable)"
-        print(f"[video:pil] 管道写入异常: {e} | FFmpeg stderr: {stderr}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False
-    except Exception as e:
-        print(f"[video:pil] 异常: {type(e).__name__}: {e}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False
+    从画面中心 (iw/2 - iw/(zoom*2)) 出发，
+    每帧向左平移 (iw * pan_pct / total_frames) 像素。
+    """
+    if total_frames <= 0:
+        return "iw/2-(iw/zoom/2)"
+    return (
+        f"iw/2-(iw/zoom/2)"
+        f"-iw*{pan_pct:.4f}*on/{total_frames}"
+    )
 
 # ============== 辅助工具 ==============
 
@@ -590,7 +469,7 @@ def _split_title_lines(title: str, max_chars: int = 16) -> list[str]:
     return [title[:best], title[best:].lstrip()]
 
 
-# ============== 视频片段生成（v4 Ken Burns + 字随音动）==============
+# ============== 视频片段生成（v10.1 Ken Burns 4x 超采样 + 字随音动）==============
 
 def create_ken_burns_clip(
     image_path: str,
@@ -607,13 +486,11 @@ def create_ken_burns_clip(
     bottom_disclaimer: str = "",
 ) -> bool:
     """
-    v10 单图 → PIL 逐帧 Ken Burns + FFmpeg drawtext 字幕。
+    v10.1 单图 → 4x 超采样 zoompan（smoothstep 缓入 + 左移）+ drawtext 字幕。
 
-    PIL LANCZOS 真子像素精度：smoothstep 缓入缩放 + 平缓左移，零抖动。
-    FFmpeg drawtext 叠加字幕，滤镜链不变。
+    4x 预放大使 zoompan 内部子像素误差 < 0.25px，肉眼不可见抖动。
+    smoothstep 曲线内置于 z 表达式，实现自然「弹入」动画效果。
     """
-    from PIL import Image as PILImage
-
     if not os.path.exists(image_path):
         print(f"[video:clip] 图片不存在: {image_path}")
         return False
@@ -629,8 +506,10 @@ def create_ken_burns_clip(
         subtitle_font_file = _find_chinese_font()
 
     total_frames = max(1, int(duration_sec * fps))
+    z_expr = _build_zoompan_z_expr(total_frames, max_zoom)
+    x_expr = _build_zoompan_x_expr(total_frames, pan_pct=0.03)
 
-    # ---- 构建 drawtext 滤镜链（逻辑不变）----
+    # ---- 构建 drawtext 滤镜链 ----
     drawtext_filters = []
 
     # --- 主字幕 ---
@@ -727,38 +606,21 @@ def create_ken_burns_clip(
         )
         drawtext_filters.append(dt_disc)
 
-    # ---- PIL 逐帧渲染 Ken Burns 画面 → FFmpeg stdin + drawtext 叠加 ----
-    img = PILImage.open(image_path).convert("RGB")
-    img_w, img_h = img.size
+    # ---- 组装滤镜链（4x 超采样 → smoothstep zoompan → drawtext → format）----
+    vf_parts = [
+        f"scale=iw*4:ih*4:flags=bicubic",
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='ih/2-(ih/zoom/2)':"
+        f"d=1:s={width}x{height}:fps={fps}",
+    ]
+    vf_parts.extend(drawtext_filters)
+    vf_parts.append("format=yuv420p")
+    vf_chain = ",".join(vf_parts)
 
-    # 预缩放
-    target_aspect = width / height
-    margin = max_zoom * 1.06  # 6% pan 余量
-    if (img_w / img_h) >= target_aspect:
-        scale_h = int(height * margin)
-        scale_w = int(scale_h * img_w / img_h)
-    else:
-        scale_w = int(width * margin)
-        scale_h = int(scale_w * img_h / img_w)
-    scale_w = max(scale_w, width + 4)
-    scale_h = max(scale_h, height + 4)
-    img = img.resize((scale_w, scale_h), PILImage.LANCZOS)
-    scaled_w, scaled_h = img.size
-    pan_px_total = scaled_w * 0.03
-
-    # FFmpeg 命令：stdin 接收 rawvideo → drawtext → 编码
-    if drawtext_filters:
-        vf_chain = ",".join(drawtext_filters + ["format=yuv420p"])
-    else:
-        vf_chain = "format=yuv420p"
     cmd = [
         "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{width}x{height}",
-        "-pix_fmt", "rgb24",
-        "-r", str(fps),
-        "-i", "-",
+        "-loop", "1",
+        "-i", image_path,
+        "-t", str(duration_sec),
         "-vf", vf_chain,
         "-c:v", "libx264",
         "-preset", "fast",
@@ -768,70 +630,23 @@ def create_ken_burns_clip(
         output_path,
     ]
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except Exception as e:
-        print(f"[video:clip] FFmpeg 启动失败: {e}")
-        return False
+    print(
+        f"[video:clip] {duration_sec:.1f}s, {total_frames}frames, "
+        f"zoom: 1.00→{max_zoom:.2f}(eased), pan: {0.03*100:.0f}%, "
+        f"字幕: {subtitle_text[:25]}..."
+    )
 
     try:
-        for fn in range(total_frames):
-            progress = fn / total_frames if total_frames > 1 else 1.0
-            eased = _smoothstep(progress)
-            current_zoom = 1.0 + (max_zoom - 1.0) * eased
-
-            vis_w = scaled_w / current_zoom
-            vis_h = scaled_h / current_zoom
-            center_x = scaled_w / 2.0
-            center_y = scaled_h / 2.0
-            crop_x = center_x - vis_w / 2.0 - pan_px_total * progress
-            crop_y = center_y - vis_h / 2.0
-            crop_x = max(0.0, min(crop_x, scaled_w - vis_w))
-            crop_y = max(0.0, min(crop_y, scaled_h - vis_h))
-
-            crop_box = (crop_x, crop_y, crop_x + vis_w, crop_y + vis_h)
-            frame = img.crop(crop_box).resize((width, height), PILImage.LANCZOS)
-            proc.stdin.write(frame.tobytes())
-
-        proc.stdin.close()
-        ret = proc.wait(timeout=300)
-
-        if ret != 0:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-300:]
-            print(f"[video:clip] FFmpeg 编码失败 (exit={ret}): {stderr}")
+        result = _run_ffmpeg(cmd, timeout=180, description=f"片段 {output_path}")
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            print(f"[video:clip] FFmpeg 错误: {stderr_tail}")
             return False
-
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print(
-                f"[video:clip] {duration_sec:.1f}s, {total_frames}frames, "
-                f"zoom: 1.00→{max_zoom:.2f}(eased), pan: {pan_px_total:.0f}px, "
-                f"字幕: {subtitle_text[:25]}..."
-            )
             return True
         return False
-
-    except (BrokenPipeError, OSError) as e:
-        try:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-400:]
-        except Exception:
-            stderr = "(unavailable)"
-        print(f"[video:clip] 管道异常: {e} | stderr: {stderr}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False
     except Exception as e:
-        print(f"[video:clip] 异常: {type(e).__name__}: {e}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        print(f"[video:clip] 异常: {e}")
         return False
 
 
@@ -1110,24 +925,65 @@ def create_card_pure_clip(
     max_zoom: float = 1.20,
 ) -> bool:
     """
-    v10 骨肉分离：生成仅含中部画面的纯视频片段（无页眉/页脚/字幕/pad）。
+    v10.1 骨肉分离：纯画面 Ken Burns 片段（4x 超采样 zoompan，零抖动 + 缓入弹入）。
 
-    PIL 逐帧 Ken Burns：smoothstep 缓入缩放 + 平缓左移，零抖动。
+    滤镜链：scale→crop→4x预放大→zoompan(smoothstep+左移)→format
     兼容 16:9（1280×720）和 9:16（1080×1920）两种源图。
     """
-    return _render_pil_ken_burns(
-        image_path=image_path,
-        output_path=output_path,
-        duration_sec=duration_sec,
-        fps=fps,
-        width=out_w,
-        height=out_h,
-        max_zoom=max_zoom,
-        pan_pct=0.03,
+    if not os.path.exists(image_path):
+        print(f"[video:pure] 图片不存在: {image_path}")
+        return False
+    if duration_sec <= 0:
+        print(f"[video:pure] 时长无效 {duration_sec}s")
+        return False
+
+    total_frames = max(1, int(duration_sec * fps))
+    z_expr = _build_zoompan_z_expr(total_frames, max_zoom)
+    x_expr = _build_zoompan_x_expr(total_frames, pan_pct=0.03)
+
+    vf_chain = (
+        f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase:flags=bicubic,"
+        f"crop={out_w}:{out_h},"
+        f"scale=iw*4:ih*4:flags=bicubic,"
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='ih/2-(ih/zoom/2)':"
+        f"d=1:s={out_w}x{out_h}:fps={fps},"
+        f"format=yuv420p"
     )
 
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-t", str(duration_sec),
+        "-vf", vf_chain,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        output_path,
+    ]
 
-# ============== 图书口播卡片片段（v5：黄金三段式布局）==============
+    print(
+        f"[video:pure] {duration_sec:.1f}s, {total_frames}frames, "
+        f"zoom: 1.00→{max_zoom:.2f}(eased), 4x oversampled"
+    )
+
+    try:
+        result = _run_ffmpeg(cmd, timeout=120, description=f"纯画面 {output_path}")
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            print(f"[video:pure] FFmpeg 错误: {stderr_tail}")
+            return False
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return True
+        return False
+    except Exception as e:
+        print(f"[video:pure] 异常: {e}")
+        return False
+
+
+# ============== 图书口播卡片片段（v10.1：黄金三段式布局 + 4x 超采样）==============
 
 def create_card_clip(
     image_path: str,
@@ -1145,13 +1001,10 @@ def create_card_clip(
     bottom_disclaimer: str = "",
 ) -> bool:
     """
-    v10 图书口播卡片风格（黄金三段式布局）。
+    v10.1 图书口播卡片（黄金三段式布局），4x 超采样 zoompan 零抖动。
 
-    中部画面区改用 PIL 逐帧 Ken Burns（零抖动 + 缓入），
-    FFmpeg pad + drawtext 叠加页眉/页脚/字幕。
+    滤镜链：crop 中部 → 4x 预放大 → zoompan(smoothstep+左移) → pad 三段 → drawtext
     """
-    from PIL import Image as PILImage
-
     if not os.path.exists(image_path):
         print(f"[video:card] 图片不存在: {image_path}")
         return False
@@ -1173,31 +1026,14 @@ def create_card_clip(
     footer_y0 = header_h + middle_h  # 1380
 
     total_frames = max(1, int(duration_sec * fps))
+    z_expr = _build_zoompan_z_expr(total_frames, max_zoom)
+    x_expr = _build_zoompan_x_expr(total_frames, pan_pct=0.03)
 
-    # === 中部画面区：PIL 逐帧 Ken Burns → rawvideo stdin ===
-    # 从原图裁出 zoom 余量区域（居中）
-    crop_h_source = int(middle_h * max_zoom)
-    crop_y0 = max(0, (height - crop_h_source) // 2)
+    # === 图片裁剪余量 ===
+    crop_h = int(middle_h * max_zoom)
+    crop_y0 = max(0, (height - crop_h) // 2)
 
-    img_full = PILImage.open(image_path).convert("RGB")
-    img_full_w, img_full_h = img_full.size
-
-    # 如果原图不是 1080×1920，先标准化
-    if img_full_w != width or img_full_h != height:
-        img_full = img_full.resize((width, height), PILImage.LANCZOS)
-
-    # 裁出中部画面区（含 zoom 余量）
-    middle_src = img_full.crop((0, crop_y0, width, crop_y0 + crop_h_source))
-    src_w, src_h = middle_src.size  # should be width × crop_h_source
-
-    # 预缩放：给 zoom + pan 留余量
-    margin = max_zoom * 1.06
-    scale_h = int(middle_h * margin)
-    scale_w = int(scale_h * src_w / src_h)
-    middle_src = middle_src.resize((scale_w, scale_h), PILImage.LANCZOS)
-    pan_px_total = scale_w * 0.03
-
-    # ---- 构建 drawtext 滤镜链（逻辑不变）----
+    # === 构建 drawtext 滤镜链 ===
     drawtext_filters = []
 
     # --- 字幕 ---
@@ -1324,21 +1160,23 @@ def create_card_clip(
                 f"shadowcolor=black@0.3:shadowx=1:shadowy=1"
             )
 
-    # ---- PIL 逐帧渲染 → FFmpeg stdin + pad + drawtext ----
-    vf_parts = []
-    vf_parts.append(f"pad={width}:{height}:0:{middle_y0}:black")
+    # ---- 组装滤镜链（crop → 4x → zoompan → pad → drawtext → format）----
+    vf_parts = [
+        f"crop={width}:{crop_h}:0:{crop_y0}",
+        f"scale=iw*4:ih*4:flags=bicubic",
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='ih/2-(ih/zoom/2)':"
+        f"d=1:s={width}x{middle_h}:fps={fps}",
+        f"pad={width}:{height}:0:{middle_y0}:black",
+    ]
     vf_parts.extend(drawtext_filters)
     vf_parts.append("format=yuv420p")
     vf_chain = ",".join(vf_parts)
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{width}x{middle_h}",
-        "-pix_fmt", "rgb24",
-        "-r", str(fps),
-        "-i", "-",
+        "-loop", "1",
+        "-i", image_path,
+        "-t", str(duration_sec),
         "-vf", vf_chain,
         "-c:v", "libx264",
         "-preset", "fast",
@@ -1348,71 +1186,22 @@ def create_card_clip(
         output_path,
     ]
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-    except Exception as e:
-        print(f"[video:card] FFmpeg 启动失败: {e}")
-        return False
-
     print(
-        f"[video:card] {duration_sec:.1f}s, "
-        f"zoom: 1.00→{max_zoom:.2f}(eased), "
-        f"卡片: 《{card_title}》"
+        f"[video:card] {duration_sec:.1f}s, {total_frames}frames, "
+        f"zoom: 1.00→{max_zoom:.2f}(eased), 卡片: 《{card_title}》"
     )
 
     try:
-        for fn in range(total_frames):
-            progress = fn / total_frames if total_frames > 1 else 1.0
-            eased = _smoothstep(progress)
-            current_zoom = 1.0 + (max_zoom - 1.0) * eased
-
-            vis_w = scale_w / current_zoom
-            vis_h = scale_h / current_zoom
-            center_x = scale_w / 2.0
-            center_y = scale_h / 2.0
-            crop_x = center_x - vis_w / 2.0 - pan_px_total * progress
-            crop_y = center_y - vis_h / 2.0
-            crop_x = max(0.0, min(crop_x, scale_w - vis_w))
-            crop_y = max(0.0, min(crop_y, scale_h - vis_h))
-
-            crop_box = (crop_x, crop_y, crop_x + vis_w, crop_y + vis_h)
-            frame = middle_src.crop(crop_box).resize((width, middle_h), PILImage.LANCZOS)
-            proc.stdin.write(frame.tobytes())
-
-        proc.stdin.close()
-        ret = proc.wait(timeout=300)
-
-        if ret != 0:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-300:]
-            print(f"[video:card] FFmpeg 编码失败 (exit={ret}): {stderr}")
+        result = _run_ffmpeg(cmd, timeout=180, description=f"卡片 {output_path}")
+        if result.returncode != 0:
+            stderr_tail = (result.stderr or "")[-500:]
+            print(f"[video:card] FFmpeg 错误: {stderr_tail}")
             return False
-
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             return True
         return False
-
-    except (BrokenPipeError, OSError) as e:
-        try:
-            stderr = (proc.stderr.read() or b"").decode("utf-8", errors="replace")[-400:]
-        except Exception:
-            stderr = "(unavailable)"
-        print(f"[video:card] 管道异常: {e} | stderr: {stderr}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False
     except Exception as e:
-        print(f"[video:card] 异常: {type(e).__name__}: {e}")
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        print(f"[video:card] 异常: {e}")
         return False
 
 
