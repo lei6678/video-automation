@@ -119,7 +119,7 @@ def _find_chinese_font() -> str:
 def _find_handwriting_font() -> str:
     """查找系统可用的书法/行楷字体（用于底部标语）。优先项目内钟齐志莽行书。"""
     from _resource import get_project_root
-    project_font = os.path.join(get_project_root(), "fonts", "钟齐志莽行书.ttf")
+    project_font = os.path.join(get_project_root(), "fonts", "Slogan_Xingkai.ttf")
     if os.path.exists(project_font):
         return project_font.replace("\\", "/").replace(":", "\\:")
     # 降级：系统楷体/行楷
