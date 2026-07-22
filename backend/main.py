@@ -1128,7 +1128,7 @@ async def init_segments(request: GenerateAudioRequest, db: Session = Depends(get
                 if len(para) <= max_chars:
                     chunks.append(para)
                 else:
-                    sp = _re.compile(r'([^。！？；\n]+[。！？；])')
+                    sp = _re.compile(r'([^。！？；：，、…—\n]+[。！？；：，、…—])')
                     sents = sp.findall(para)
                     cur = ""
                     for s in sents:
@@ -1138,8 +1138,19 @@ async def init_segments(request: GenerateAudioRequest, db: Session = Depends(get
                             if cur:
                                 chunks.append(cur)
                             if len(s) > max_chars:
-                                for k in range(0, len(s), max_chars):
-                                    chunks.append(s[k:k+max_chars])
+                                _start = 0
+                                while _start < len(s):
+                                    _end = min(_start + max_chars, len(s))
+                                    if _end < len(s):
+                                        _best = _end
+                                        for _off in range(max_chars // 4, -(max_chars // 4), -1):
+                                            _chk = _end - _off
+                                            if 0 < _chk < len(s) and s[_chk] in '，,.、…— ；;：:。！？':
+                                                _best = _chk
+                                                break
+                                        _end = _best
+                                    chunks.append(s[_start:_end].strip())
+                                    _start = _end
                                 cur = ""
                             else:
                                 cur = s

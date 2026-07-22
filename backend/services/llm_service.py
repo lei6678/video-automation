@@ -72,9 +72,10 @@ async def clean_asr_text(
 
 # ============== 脚本改写函数 =============
 
-# 提示词文件目录
+# 提示词文件目录 — 用 get_project_root() 兼容开发/打包两种模式
 import os as _os
-_PROMPTS_DIR = _os.path.join(_os.path.dirname(__file__), "..", "prompts")
+from _resource import get_project_root
+_PROMPTS_DIR = _os.path.join(get_project_root(), "backend", "prompts")
 
 # 提示词缓存（文件内容只在模块首次使用时加载一次）
 _PROMPT_CACHE: dict[str, str] = {}
@@ -112,7 +113,7 @@ async def extract_visual_context(rewritten_text: str) -> str:
     response = await client.chat.completions.create(
         model="deepseek-chat",
         messages=[
-            {"role": "system", "content": "你是一个严谨的视觉档案提取助手。只提取文案中明确提到的信息，不要编造任何细节。"},
+            {"role": "system", "content": "你是一个视觉档案提取助手。从文案中提取主人公视觉特征并严格按指定格式输出。不回答、不确认、不解释，不输出空模板，只输出有实际内容的档案。"},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0.1,
@@ -439,7 +440,7 @@ def split_into_short_sentences(text: str, max_chars: int = 80, min_chars: int = 
     """
     把口播稿按其标点切分为短句，用于配图分镜。
 
-    大佬经验: 只按强标点（。！？）切分，不按逗号切。
+    优先级：强标点（。！？）> 中强标点（；;：:）> 弱停顿（，、…—）> 安全硬切（标点处）
     ~4000 字 → ~63 句 → 7 组九宫格 → 63 张分镜图。
     每句约 60~65 字，对应约 18 秒口播——刚好是一张 Ken Burns 图的自然展示时长。
 
@@ -464,8 +465,8 @@ def split_into_short_sentences(text: str, max_chars: int = 80, min_chars: int = 
         if len(chunk) <= max_chars:
             sentences.append(chunk)
         else:
-            # 第二步：超长句才进一步按分号/冒号切分（不按逗号切）
-            sub = _re.split(r'(?<=[；;：:])', chunk)
+            # 第二步：超长句才进一步按分号/冒号/逗号切分
+            sub = _re.split(r'(?<=[；;：:，、…—])', chunk)
             cur = ""
             for part in sub:
                 part = part.strip()
@@ -476,10 +477,21 @@ def split_into_short_sentences(text: str, max_chars: int = 80, min_chars: int = 
                 else:
                     if cur.strip():
                         sentences.append(cur.strip())
-                    # 如果还超长，按 max_chars 硬切（极少见）
+                    # 如果还超长，在 max_chars 附近找标点切分，避免斩断词组
                     if len(part) > max_chars:
-                        for k in range(0, len(part), max_chars):
-                            sentences.append(part[k:k + max_chars].strip())
+                        _start = 0
+                        while _start < len(part):
+                            _end = min(_start + max_chars, len(part))
+                            if _end < len(part):
+                                _best = _end
+                                for _off in range(max_chars // 4, -(max_chars // 4), -1):
+                                    _chk = _end - _off
+                                    if 0 < _chk < len(part) and part[_chk] in '，,.、…— ；;：:。！？':
+                                        _best = _chk
+                                        break
+                                _end = _best
+                            sentences.append(part[_start:_end].strip())
+                            _start = _end
                         cur = ""
                     else:
                         cur = part

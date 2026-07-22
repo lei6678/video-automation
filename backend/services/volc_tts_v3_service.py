@@ -367,8 +367,8 @@ async def synthesize_clone(
 
 def _get_library_path() -> str:
     """本地音色库 JSON 路径"""
-    base = os.path.dirname(os.path.abspath(__file__))
-    lib_dir = os.path.join(base, "..", "data", "voice_library")
+    from _resource import get_data_dir
+    lib_dir = os.path.join(get_data_dir(), "voice_library")
     os.makedirs(lib_dir, exist_ok=True)
     return os.path.join(lib_dir, "voice_library.json")
 

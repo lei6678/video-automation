@@ -654,6 +654,62 @@ async def _generate_keling(prompt: str, size: str = "1080x1920") -> Optional[str
         return None
 
 
+# ============== 视觉档案合法性校验 ==============
+
+def _is_valid_visual_profile(text: str) -> bool:
+    """校验 LLM 返回的视觉档案是否合法，过滤客套话/幻觉/空模板。
+
+    正常档案至少包含 "主人公视觉档案" 或 "性别" 关键词，且有实际内容。
+    拦截以下情况：
+    - LLM 客套话（"好的"、"明白了"、"请提供"）
+    - 空填表模板（字段名存在但字段值全为空）
+    - 纯 markdown 格式模板（LLM 自作主张画表格）
+    """
+    if not text or not text.strip():
+        return False
+    t = text.strip()
+
+    # 1. 客套话检测
+    platitudes = ["好的", "明白了", "请提供", "以下是", "根据您", "收到"]
+    first_line = t.split("\n")[0].strip()
+    for p in platitudes:
+        if first_line.startswith(p):
+            return False
+
+    # 2. Markdown 模板检测（LLM 自作主张画**加粗**或#标题的表格框架）
+    if first_line.startswith("**") or first_line.startswith("#"):
+        return False
+
+    # 3. 必须有档案特征关键词
+    has_profile_header = "主人公视觉档案" in t or "视觉档案" in t
+    has_gender = "性别" in t or "男" in first_line or "女" in first_line
+    has_body = "身体特征" in t
+    if not (has_profile_header or (has_gender and has_body)):
+        return False
+
+    # 4. 空模板检测：字段行数很多但几乎都为空值
+    #    统计 "字段名：X" 模式中 X 非空的行占比
+    lines = t.split("\n")
+    field_lines = 0
+    filled_lines = 0
+    for line in lines:
+        if "：" in line or ":" in line:
+            field_lines += 1
+            # 冒号后有超过2个非空白字符才算是有效填充
+            for sep in ("：", ":"):
+                if sep in line:
+                    val = line.split(sep, 1)[1].strip()
+                    if len(val) >= 2:
+                        filled_lines += 1
+                    break
+    # 字段行超过3行但填充行不到一半 → 空模板
+    if field_lines >= 4 and filled_lines < field_lines * 0.5:
+        print(f"[image:v4] 视觉档案疑似空模板: {field_lines}字段行, 仅{filled_lines}行有内容")
+        return False
+
+    return True
+
+
 # ============== 主入口：按句批量生图（v4 单图直生）==============
 
 async def generate_all_images(
@@ -740,9 +796,13 @@ async def generate_all_images(
         try:
             visual_context = await extract_visual_context(rewritten)
             if visual_context.strip():
-                task.visual_context = visual_context
-                db.commit()
-                print(f"[image:v4] 视觉档案已缓存到 task.visual_context")
+                if _is_valid_visual_profile(visual_context):
+                    task.visual_context = visual_context
+                    db.commit()
+                    print(f"[image:v4] 视觉档案已缓存到 task.visual_context")
+                else:
+                    print(f"[image:v4] 视觉档案校验不通过（疑似客套话），丢弃。内容前80字: {visual_context[:80]}")
+                    visual_context = ""
         except Exception as e:
             print(f"[image:v4] 视觉档案提取失败: {e}，跳过")
             visual_context = ""

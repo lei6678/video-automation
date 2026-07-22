@@ -52,3 +52,9 @@ bin/ffmpeg.exe
 
 # 分发压缩包（体积大，本地生成）
 VideoWorkstation_*.zip
+
+# Claude Code 工作目录（每台机器独立）
+.claude/
+
+# Windows NUL 设备文件（误创建）
+nul

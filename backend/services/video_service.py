@@ -1903,7 +1903,8 @@ async def compose_final_video(
     if not task:
         return {"error": f"任务 {task_id} 不存在", "segment_count": 0}
 
-    tasks_dir = os.path.join(os.path.dirname(__file__), "..", "data", "tasks")
+    from _resource import get_data_dir
+    tasks_dir = os.path.join(get_data_dir(), "tasks")
     task_dir = os.path.join(os.path.abspath(tasks_dir), str(task_id))
 
     # ---- 2. 读取改写稿 + 用与生图一致的参数切句 ----
