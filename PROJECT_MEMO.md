@@ -29,8 +29,19 @@
 - `.claude/settings.local.json` 全面放行：Read/Write/Edit/Glob/Grep/PowerShell 等
 - 项目记忆目录建立：`memory/autonomous-work.md`
 
+### 六、项目清理
+- 删除 61 个 TTS/音色调试产生的 `test_*.mp3` 测试残留
+- 8 个 `test_volc_*.py` 移入 `backend/tests/`，避免触发热重载
+- 前端 `voice_preview_*.mp3` 废弃音色预览清理
+
+### 七、FFmpeg PATH 修复
+- **故障**：配音片段生成成功，`merge_segments` 调用 ffmpeg 时报 `FileNotFoundError`
+- **根因**：winget 安装的 FFmpeg 在 `WinGet\Links\`，但服务器进程启动时 PATH 未刷新
+- **修复**：FFmpeg 实际 bin 目录 `Gyan.FFmpeg...\bin` 写入 User PATH，重启服务器生效
+- **验证**：task 3 王立群配音 26 片段全部合成成功
+
 ### 明天计划
-- 验证完整工作流：文案导入 → 改写 → 配音 → 生图 → 合成成片
+- 验证完整工作流：文案导入 → 改写 → 配音 → 生图 → 合成成片（从 task 3 继续）
 
 ---
 
