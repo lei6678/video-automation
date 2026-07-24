@@ -1,0 +1,13 @@
+# index-tts2 本地 TTS 服务依赖
+# 安装方式: pip install -r requirements.txt
+# 首次启动会自动下载模型权重（需要网络）
+
+# 核心 TTS 引擎
+# index-tts2 底层基于 VITS/GPT-SoVITS 架构
+# 如 pip install index-tts2 不可用，改用直接安装 git 仓库版本：
+# pip install git+https://github.com/index-tts/index-tts2.git
+
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+requests>=2.31.0

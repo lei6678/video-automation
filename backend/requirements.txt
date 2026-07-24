@@ -1,0 +1,12 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+sqlalchemy>=2.0.0
+edge-tts>=0.7.0
+playwright>=1.40.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+requests>=2.28.0
+openai>=1.0.0
+moviepy>=2.0.0
+Pillow>=10.0.0

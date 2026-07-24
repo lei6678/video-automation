@@ -1,0 +1,61 @@
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import copy_metadata
+
+datas = [
+    ('frontend/dist', 'frontend/dist'),
+    ('fonts', 'fonts'),
+    ('backend/prompts', 'backend/prompts'),
+]
+datas += copy_metadata('imageio')
+
+a = Analysis(
+    ['backend\\main.py'],
+    pathex=[],
+    binaries=[('bin/ffmpeg.exe', '.')],
+    datas=datas,
+    hiddenimports=[
+        'sqlalchemy.ext.asyncio',
+        'fastapi.middleware',
+        'uvicorn.logging',
+        'uvicorn.loops',
+        'uvicorn.protocols',
+        'imageio',
+        'imageio.v2',
+        'PIL',
+        'PIL.Image',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='VideoWorkstation',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='VideoWorkstation',
+)
