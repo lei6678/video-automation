@@ -109,3 +109,22 @@ uvicorn main:app --reload       # 开发模式：仅 API，http://localhost:8000
 - **增量 TTS**：跳过已成功的片段，失败片段可单独重跑 `POST /api/tts/regenerate-segment`
 - **纯文本任务**：`POST /api/tasks/from-text` 跳过下载/ASR，直接进入 Step 02（改写）
 - **TTS 优先 index-tts2**（:7860），不可用时降级 edge-tts（微软云），同一音色不切换保证作品一致性
+
+## 下班结项 SOP
+
+当用户说「下班」「今天到此结束」「收工」等结束语时，自动执行：
+
+1. **更新 PROJECT_MEMO.md**：用最精炼的中文记录今天的主要成果和重要决策，写清明天的下一步计划
+2. **Git 提交推送**：
+   ```bash
+   git add -A
+   git commit -m "checkpoint: [今日成果简述]"
+   git push origin master
+   ```
+3. **蜂鸣提醒**：执行 `echo \`a` 或 PowerShell beep
+4. **确认完成**：告知用户已存档并推送成功
+
+### Git 仓库信息
+- Remote: `https://github.com/xiankai378/video-automation.git`
+- Branch: `master`
+- 凭证已配置 credential helper，免密推送
