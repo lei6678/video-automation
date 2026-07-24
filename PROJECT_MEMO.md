@@ -1,5 +1,39 @@
 # 项目备忘录
 
+## 2026-07-24 环境迁移与基建完善
+
+### 一、项目迁移：E:\ → D:\
+- 项目从 `E:\video-automation` 迁移到 `D:\VideoWorkstation_Deploy`
+- 修复 `启动工作台.bat` 路径、成品输出目录 `E:\成片输出` → `D:\成片输出`
+- 启动时自动打开浏览器（修复了仅 exe 模式触发的 bug）
+
+### 二、系统环境补齐
+- **FFmpeg 8.1.2**：winget 安装，视频合成/AAC 编码依赖
+- **Git 2.55**：winget 安装，版本控制就绪
+- 全部 Python 依赖验证通过，7 个服务模块导入正常
+
+### 三、王立群音色重建
+- 旧 speaker `S_zT84tud82` 在新 APP `6501796742` 下失效
+- 火山引擎声音复刻 2.0 权限开通后，用参考音频重新克隆
+- 新 speaker ID：`S_FqsgYzu92`
+- 参考音频：`backend/data/reference_wanglq.mp3`（来自 E:\ 微信文件）
+- 更新位置：`tts_service.py`、`volc_tts_v3_service.py`、`PROJECT_MEMO.md`
+
+### 四、Git + GitHub 仓库建立
+- 注册 GitHub 账号 `lei6678`，Token 已配置
+- 远程仓库：`github.com/lei6678/video-automation`
+- `git filter-repo` 清理旧测试文件中的硬编码密钥
+- CLAUDE.md 新增「下班结项 SOP」：说"下班"即自动更新备忘 + commit + push + 蜂鸣
+
+### 五、权限与自动化
+- `.claude/settings.local.json` 全面放行：Read/Write/Edit/Glob/Grep/PowerShell 等
+- 项目记忆目录建立：`memory/autonomous-work.md`
+
+### 明天计划
+- 验证完整工作流：文案导入 → 改写 → 配音 → 生图 → 合成成片
+
+---
+
 ## 2026-07-18 生图性能诊断与三连修复
 
 ### 一、问题发现
