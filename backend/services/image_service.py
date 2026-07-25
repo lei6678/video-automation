@@ -68,12 +68,12 @@ STYLE_BIBLES = {
         "contemplative depth, Terrence Malick golden hour, anamorphic lens feel"
     ),
     "documentary_realism": (
-        "gritty documentary photography, desaturated cold grey tones, "
-        "low exposure, harsh side light or overcast diffused light, deep shadows, "
-        "weathered textures, imperfect composition, peeling walls, cracked floors, "
-        "worn clothing, sparse furniture, unpolished realism, reportage style, "
-        "no warm filters, no softening, no glamour — this is hardship, not nostalgia, "
-        "restrained facial expressions, body language conveying endurance"
+        "cinematic neorealism, atmospheric natural light through windows and doorways, "
+        "warm earth tones + faded sage greens + dusty rose, "
+        "intimate handheld composition, shallow depth of field on faces and hands, "
+        "aged textures — weathered wood, peeling paint, worn fabric — beautiful in their decay, "
+        "ordinary people in quiet moments of dignity, "
+        "inspired by Wong Kar-wai and Zhang Yimou's early works"
     ),
 }
 
@@ -97,20 +97,52 @@ STYLE_PROMPT_MAP = {
         "wide landscape scale, anamorphic lens feel, contemplative atmosphere"
     ),
     "documentary_realism": (
-        ", gritty documentary photography, desaturated cold tones, "
-        "harsh available light, unpolished realism, reportage style, "
-        "no glamour, no beauty filter, no retouching"
+        ", cinematic photography, atmospheric lighting, rich textures, "
+        "award-winning composition, elegant, timeless"
     ),
 }
 
 # ============== 画面后置防线 ==============
 
 SAFETY_SUFFIX = (
-    ", highly detailed, natural skin texture, no duplicate faces, "
+    ", single image, no collage, no multi-panel, no grid, "
+    "highly detailed, natural skin texture, no duplicate faces, "
     "masterpiece composition, no text, no watermark, no graphic overlay"
 )
 
-# ============== v5：全局视觉规划（LLM 通读全文 → 逐段画面 Prompt）==============
+# ============== v7 全局风格锁（对标 Gemini 分析 — 每张图末尾强制注入）==============
+
+STYLE_LOCK = (
+    "Wong Kar-wai film aesthetic, 85mm lens, shallow depth of field, "
+    "beautiful bokeh, photorealistic, ultra-high definition, masterpiece, "
+    "highly detailed skin texture, rich cinematic contrast, "
+    "nostalgic retro film aesthetic"
+)
+
+# ============== v7 情绪光影字典（对标题 Gemini 分析报告3）==============
+
+EMOTION_LIGHTING = {
+    "glory": (
+        "Warm amber and gold color palette, bright marquee lights, high contrast, "
+        "radiant cinematic lighting, hopeful atmosphere"
+    ),
+    "tragedy": (
+        "Cold cyan and grey tone, desaturated colors, overcast lighting, "
+        "deep shadows, melancholic and oppressive atmosphere, low key lighting"
+    ),
+    "transition": (
+        "Golden hour lighting, sunset silhouette, dusty air, rim light, "
+        "cinematic rim lighting, epic and nostalgic atmosphere"
+    ),
+    "daily": (
+        "Soft natural lighting, diffuse light, neutral color palette, "
+        "gentle shadows, documentary style"
+    ),
+}
+
+def get_emotion_lighting(emotion: str) -> str:
+    """根据情绪标签返回对应的光影描述。"""
+    return EMOTION_LIGHTING.get(emotion, EMOTION_LIGHTING["daily"])
 
 async def plan_visual_arc(
     rewritten_transcript: str,
@@ -119,9 +151,11 @@ async def plan_visual_arc(
     visual_context: str = "",
     style: str = "default",
     total_segments: int = 1,
+    sentences: list = None,
 ) -> dict:
     """
     v5 核心：LLM 通读全文 → 输出全局视觉方向（单次 API，短平快）。
+    sentences: 预切分好的文案列表，用于生成带编号的分段提示。
     """
     deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
     if not deepseek_key:
@@ -129,38 +163,75 @@ async def plan_visual_arc(
         return {}
 
     system_prompt = (
-        "You are a cinematographer. Read the full story and output a JSON with three keys:\n"
-        '- "global_style": overall visual language in English photography terms '
-        "(lighting, lens, texture, color palette, era mood) — 60-120 words\n"
-        '- "color_arc": how colors evolve with the narrative arc in English — 20-50 words\n'
-        '- "era_notes": key era/environment details in Chinese (年代, 地点, 典型场景) — 20-60 words\n'
-        "Output pure JSON only, no markdown."
-    )
+        "You are a cinematographer directing a BIOGRAPHY film about ONE woman. "
+        "The story has {total} numbered segments. Output JSON. ALL text in ENGLISH.\n\n"
+        "=== EMOTION LIGHTING DICTIONARY (match each scene to one) ===\n"
+        "1. glory (peak fame, success, joy): warm amber gold, bright marquee lights, high contrast\n"
+        "2. tragedy (death, betrayal, persecution, asylum): cold cyan grey, desaturated, overcast, deep shadows\n"
+        "3. transition (fleeing, journey, uncertainty): golden hour, sunset silhouette, rim light\n"
+        "4. daily (learning, ordinary life): soft natural light, diffuse, neutral palette\n\n"
+        "=== OUTPUT KEYS ===\n"
+        '- "protagonist": fixed character reference for EVERY image. Describe her as '
+        "East Asian Chinese woman, with key physical traits and how she ages (14→72). "
+        "Include specific visual cues: hairstyle (1930s wavy bob when young), "
+        "typical clothing (cheongsam/qipao, cotton dress), expression range. 20-30 words.\n"
+        '- "scenes": array of {total} objects, each with:\n'
+        '   - "emotion": one of [glory, tragedy, transition, daily]\n'
+        '   - "scene": DETAILED English visual description, 15-30 words. '
+        "MUST include: specific costume, specific prop or setting detail, "
+        "specific lighting source. Be VIVID — NOT 'girl in studio' but "
+        "'young woman in plain cotton qipao, hand on a wooden barre, "
+        "morning light streaming through tall windows of a 1930s Shanghai dance studio'. "
+        "The protagonist is the subject of EVERY scene.\n"
+        '- "era_notes": atmosphere in Chinese, 20-40 words (for reference only)\n'
+        "SAFETY: no deathbeds, no graves, no blood, no crying faces. "
+        "Use poetic distance: an empty chair, light through a window, a silhouette.\n"
+        "Output pure JSON, no markdown."
+    ).replace("{total}", str(total_segments))
 
     context_block = ""
     if visual_context.strip():
-        context_block = f"\nCharacter ref: {visual_context.strip()[:200]}"
+        context_block = (
+            f"\nCHARACTER PROFILE (use this for the 'protagonist' key):\n"
+            f"{visual_context.strip()}\n"
+        )
+
+    # 构建带编号的分段列表，确保 scenes[i] 对应 segment[i]
+    if sentences and len(sentences) == total_segments:
+        numbered = "\n".join(
+            f"[{i}] {s}" for i, s in enumerate(sentences)
+        )
+        story_block = (
+            f"=== SEGMENTED STORY ({total_segments} segments) ===\n"
+            f"Each [N] below corresponds to scenes[N] in your output.\n"
+            f"scenes[i] MUST visually reflect the content of segment [i].\n\n"
+            f"{numbered}\n=== END ==="
+        )
+    else:
+        story_block = (
+            f"=== STORY ===\n{rewritten_transcript.strip()}\n=== END ==="
+        )
 
     user_prompt = (
         f"Title: {book_title or 'N/A'}\nAuthor: {book_author or 'N/A'}\n"
         f"Style: {style}\nSegments: {total_segments}\n"
         f"{context_block}\n"
-        f"=== STORY ===\n{rewritten_transcript.strip()}\n=== END ===\n"
+        f"{story_block}\n"
         f"Output the JSON now."
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
             resp = await http.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-v4-pro",
+                    "model": "deepseek-v4-flash",
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 1024,
+                    "max_tokens": 8192,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -194,6 +265,37 @@ _SENTENCE_CACHE: dict[tuple[int, int], list[str]] = {}
 
 # 敏感词 → 中性替代词映射（按风险从高到低排列，长匹配优先）
 _CONTENT_SANITIZE_MAP: list[tuple[str, str]] = [
+    # 死亡/疾病/葬礼类（先匹配长的，用于 scenes 过滤）
+    ("kneeling", "sitting"),
+    ("somber", "quiet"),
+    ("mourning", "quiet"),
+    ("deathbed", "bedside in dim light"),
+    ("mother's deathbed", "quiet bedside vigil"),
+    ("funeral", "memorial gathering"),
+    ("dying", "resting"),
+    ("death", "loss"),
+    ("coffin", "wooden bed"),
+    ("grave", "quiet hill"),
+    ("tomb", "quiet place"),
+    ("blood", "water"),
+    ("wound", "scar"),
+    ("crying", "gazing"),
+    ("tear-streaked", "quiet"),
+    ("tears", "quiet gaze"),
+    ("tear", "quiet"),
+    ("hornet sting", "childhood memory"),
+    (" sting ", " brief pain "),
+    (" stung ", " touched "),
+    ("hospital", "quiet room"),
+    ("mental ward", "quiet corridor"),
+    ("asylum", "old building"),
+    ("fleeing", "traveling"),
+    ("fled", "traveled"),
+    ("flee", "depart"),
+    ("deathbed", "bedside"),
+    ("mother's deathbed", "mother's bedside"),
+    ("funeral", "memorial"),
+    ("death", "loss"),
     # 暴力/伤害类（长匹配优先）
     ("碰高压电", "遭遇意外"),
     ("高压电", "意外事故"),
@@ -310,7 +412,7 @@ async def _llm_sanitize_segment(
             resp = await http.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-chat",
+                    "model": "deepseek-v4-flash",
                     "messages": [
                         {"role": "system", "content": system_msg},
                         {"role": "user", "content": user_msg},
@@ -543,25 +645,36 @@ def build_single_segment_prompt(
     最终 prompt 格式：
     [中文场景描述]。[英文视觉词汇]。全局风格 + 质量词。
     """
-    # === v5 优先：使用 LLM 全局视觉方向 ===
+    # === v7 优先：主角 + 情绪光影 + 具象场景 + 全局风格锁 ===
     if visual_plan:
-        global_style = visual_plan.get("global_style", "")
-        color_arc = visual_plan.get("color_arc", "")
-        era_notes = visual_plan.get("era_notes", "")
-        if global_style:
-            # 混合 prompt：中文场景内容 + 英文视觉风格 + 色调弧线
-            prompt = (
-                f"{text.strip()} "
-                f"{global_style}. "
-                f"Color progression: {color_arc}. "
-                f"no text, no watermark"
-            )
-            seg_count = visual_plan.get("_total_segments", total_segments)
-            print(
-                f"[image:prompt] seg {segment_index} v5全局规划, "
-                f"len={len(prompt)} (text={len(text.strip())}+style={len(global_style)})"
-            )
-            return prompt
+        protagonist = visual_plan.get("protagonist", "East Asian woman")
+        scenes = visual_plan.get("scenes", [])
+
+        if scenes and segment_index < len(scenes):
+            entry = scenes[segment_index]
+            # 兼容两种格式：字符串或 {"emotion": ..., "scene": ...}
+            if isinstance(entry, dict):
+                emotion = entry.get("emotion", "daily")
+                scene_desc = _sanitize_prompt(entry.get("scene", ""))
+            else:
+                emotion = "daily"
+                scene_desc = _sanitize_prompt(str(entry))
+
+            if scene_desc:
+                emotion_light = get_emotion_lighting(emotion)
+                prompt = (
+                    f"A cinematic photograph, 8:9 vertical. "
+                    f"Subject: {protagonist}. "
+                    f"Scene: {scene_desc}. "
+                    f"Lighting: {emotion_light}. "
+                    f"{STYLE_LOCK}. "
+                    f"single image, no text, no watermark"
+                )
+                print(
+                    f"[image:prompt] seg {segment_index} v7情绪光影, "
+                    f"emotion={emotion}, len={len(prompt)}"
+                )
+                return prompt
 
     # === 降级：旧版模板（无 visual_plan 时使用）===
     if not style_bible:
@@ -585,6 +698,187 @@ def build_single_segment_prompt(
     )
     print(f"[image:prompt] seg {segment_index} 降级模板, len={len(prompt)}")
     return prompt
+
+
+# ============== 通道 A2：Fal.ai flux-dev（备选，人物一致性更强）==============
+
+async def _generate_fal_flux(
+    prompt: str,
+    width: int = 1080,
+    height: int = 1214,
+    num_inference_steps: int = 28,
+    guidance_scale: float = 3.5,
+) -> Optional[str]:
+    """
+    调用 Fal.ai fal-ai/flux/dev 生成图片。
+
+    Flux 在提示词遵循度和人物一致性上优于 gpt-image-2，
+    适合需要同一个人物出现在多张图片中的传记类内容。
+
+    Args:
+        prompt: 生图 prompt（英文自然语言，Flux 原生支持）
+        width, height: 画布尺寸（Flux 要求 8 的倍数，会自动对齐到 64 的倍数）
+        num_inference_steps: 推理步数（默认 28，越高品质越好但越慢）
+        guidance_scale: 提示词引导强度（默认 3.5）
+
+    Returns:
+        base64 图片字符串，失败返回 None
+    """
+    if not FAL_KEY:
+        print("[image:flux] FAL_KEY 未设置")
+        return None
+
+    url = "https://fal.run/fal-ai/flux/dev"
+    headers = {
+        "Authorization": f"Key {FAL_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # Flux 要求尺寸为 8 的倍数，向下对齐
+    original_w, original_h = width, height
+    width = (width // 8) * 8
+    height = (height // 8) * 8
+    if (width, height) != (original_w, original_h):
+        print(f"[image:flux] 尺寸对齐 8 倍数: {original_w}x{original_h} → {width}x{height}")
+
+    payload = {
+        "prompt": prompt,
+        "image_size": {"width": width, "height": height},
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "sync_mode": True,
+    }
+
+    total_pixels = width * height
+    print(
+        f"[image:flux] 请求 fal-ai/flux/dev, "
+        f"size={width}x{height} ({total_pixels / 1e6:.1f}MP), "
+        f"steps={num_inference_steps}, guidance={guidance_scale}, "
+        f"prompt_len={len(prompt)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            images = data.get("images", [])
+            if images and len(images) > 0:
+                img = images[0]
+                img_url = img.get("url", "")
+
+                if img_url.startswith("data:"):
+                    b64 = img_url.split(",", 1)[1] if "," in img_url else img_url
+                    print(f"[image:flux] 生图成功 (data URI), base64_len={len(b64)}")
+                    return b64
+                elif img_url.startswith("http"):
+                    print(f"[image:flux] 生图成功, 从 URL 下载: {img_url[:80]}...")
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl:
+                        img_resp = await dl.get(img_url)
+                        if img_resp.status_code == 200:
+                            b64 = base64.b64encode(img_resp.content).decode("utf-8")
+                            print(f"[image:flux] 下载完成, base64_len={len(b64)}")
+                            return b64
+                else:
+                    print(f"[image:flux] 未知 URL 格式: {img_url[:100]}")
+                    return None
+            print(f"[image:flux] 返回数据无 images: {json.dumps(data, ensure_ascii=False)[:300]}")
+            return None
+        else:
+            err = resp.text[:500]
+            print(f"[image:flux] API 错误 {resp.status_code}: {err}")
+            return None
+
+    except httpx.TimeoutException:
+        print("[image:flux] 请求超时 (300s)")
+        return None
+    except Exception as e:
+        print(f"[image:flux] 异常: {type(e).__name__}: {e}")
+        return None
+
+
+# ============== 通道 A3：Fal.ai flux-pro（高品质备选）==============
+
+async def _generate_fal_flux_pro(
+    prompt: str,
+    width: int = 1080,
+    height: int = 1214,
+    num_inference_steps: int = 40,
+    guidance_scale: float = 4.0,
+) -> Optional[str]:
+    """调用 Fal.ai fal-ai/flux-pro 生成图片（比 flux-dev 品质更高）。"""
+    if not FAL_KEY:
+        print("[image:flux-pro] FAL_KEY 未设置")
+        return None
+
+    url = "https://fal.run/fal-ai/flux-pro"
+    headers = {
+        "Authorization": f"Key {FAL_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    original_w, original_h = width, height
+    width = (width // 8) * 8
+    height = (height // 8) * 8
+    if (width, height) != (original_w, original_h):
+        print(f"[image:flux-pro] 尺寸对齐 8 倍数: {original_w}x{original_h} → {width}x{height}")
+
+    payload = {
+        "prompt": prompt,
+        "image_size": {"width": width, "height": height},
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "sync_mode": True,
+    }
+
+    total_pixels = width * height
+    print(
+        f"[image:flux-pro] 请求 fal-ai/flux-pro, "
+        f"size={width}x{height} ({total_pixels / 1e6:.1f}MP), "
+        f"steps={num_inference_steps}, guidance={guidance_scale}, "
+        f"prompt_len={len(prompt)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            images = data.get("images", [])
+            if images and len(images) > 0:
+                img = images[0]
+                img_url = img.get("url", "")
+
+                if img_url.startswith("data:"):
+                    b64 = img_url.split(",", 1)[1] if "," in img_url else img_url
+                    print(f"[image:flux-pro] 生图成功 (data URI), base64_len={len(b64)}")
+                    return b64
+                elif img_url.startswith("http"):
+                    print(f"[image:flux-pro] 生图成功, 从 URL 下载: {img_url[:80]}...")
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl:
+                        img_resp = await dl.get(img_url)
+                        if img_resp.status_code == 200:
+                            b64 = base64.b64encode(img_resp.content).decode("utf-8")
+                            print(f"[image:flux-pro] 下载完成, base64_len={len(b64)}")
+                            return b64
+                else:
+                    print(f"[image:flux-pro] 未知 URL 格式: {img_url[:100]}")
+                    return None
+            print(f"[image:flux-pro] 返回数据无 images: {json.dumps(data, ensure_ascii=False)[:300]}")
+            return None
+        else:
+            err = resp.text[:500]
+            print(f"[image:flux-pro] API 错误 {resp.status_code}: {err}")
+            return None
+
+    except httpx.TimeoutException:
+        print("[image:flux-pro] 请求超时 (300s)")
+        return None
+    except Exception as e:
+        print(f"[image:flux-pro] 异常: {type(e).__name__}: {e}")
+        return None
 
 
 # ============== 通道 A：Fal.ai gpt-image-2（主力）==============
@@ -894,6 +1188,7 @@ async def generate_all_images(
         visual_context=visual_context,
         style=style,
         total_segments=total_segments,
+        sentences=sentences,
     )
     if visual_plan:
         plan_segments = len(visual_plan.get("segments", []))
@@ -956,7 +1251,7 @@ async def generate_all_images(
                 actual_style_bible = style_bible
                 actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
-            # 构建 Prompt（v5：优先使用 LLM 视觉规划）
+            # 构建 Prompt（v7：已内置情绪光影+风格锁+安全后缀，不需额外追加）
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -968,7 +1263,10 @@ async def generate_all_images(
                 visual_context=visual_context,
                 visual_plan=visual_plan,
             )
-            final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
+            if visual_plan:
+                final_prompt = base_prompt  # v7: 已包含所有风格元素
+            else:
+                final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
             # 保存 prompt 到文件
             prompt_path = os.path.join(images_dir, f"seg_{seg_idx:03d}_prompt.txt")
@@ -1276,7 +1574,10 @@ async def regenerate_single_image(
         aspect_ratio=aspect_ratio,
         visual_context=visual_context,
     )
-    prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
+    if visual_plan:
+        prompt = base_prompt
+    else:
+        prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
     print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
 

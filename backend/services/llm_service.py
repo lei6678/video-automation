@@ -353,7 +353,7 @@ async def split_title_two_lines(title: str, book_title: str = "", book_author: s
 
     try:
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT_TITLE_SPLIT},
                 {"role": "user", "content": user_prompt}
