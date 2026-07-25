@@ -90,6 +90,128 @@ def _build_zoompan_x_expr(total_frames: int, pan_pct: float = 0.03) -> str:
         f"-iw*{pan_pct:.4f}*on/{total_frames}"
     )
 
+# ============== v11 多关键帧 Ken Burns ==============
+
+
+def _build_zoompan_z_multikey(total_frames: int, phases: list[dict]) -> str:
+    """
+    多关键帧 Zoom 表达式：在单个 zoompan 内实现分段变速缩放。
+
+    phases: [{"pct": 0.35, "zoom_end": 1.04, "easing": "smoothstep"}, ...]
+    pct 相加应等于 1.0，zoom_end 递增。
+    每段内部用 smoothstep/sine/linear 缓和过渡，段间 zoom 连续。
+    """
+    if total_frames <= 0 or not phases:
+        return "1.0"
+
+    n = len(phases)
+    cum = 0
+    boundaries = []  # 每段的结束帧号（全局 on 值）
+    for p in phases:
+        cum += max(1, int(total_frames * p["pct"]))
+        boundaries.append(cum)
+
+    zoom = [1.0] + [p["zoom_end"] for p in phases]
+
+    def _smoothstep(t: str) -> str:
+        return f"(3*pow({t},2)-2*pow({t},3))"
+
+    def _sine(t: str) -> str:
+        return f"(1-cos({t}*PI/2))"
+
+    _EASE_FN = {"smoothstep": _smoothstep, "sine": _sine}
+
+    def _phase_expr(i: int) -> str:
+        """第 i 段 (0-indexed) 的 zoom 计算表达式"""
+        z0, z1 = zoom[i], zoom[i + 1]
+        delta = z1 - z0
+        if abs(delta) < 0.0001:
+            return f"{z0:.4f}"
+        prev_b = boundaries[i - 1] if i > 0 else 0
+        curr_b = boundaries[i]
+        t = f"(on-{prev_b})/{curr_b - prev_b}"
+        ease_name = phases[i].get("easing", "smoothstep")
+        ease_fn = _EASE_FN.get(ease_name, _smoothstep)
+        return f"{z0:.4f}+{delta:.4f}*{ease_fn(t)}"
+
+    # 从后向前嵌套 if(lt(...), phase_i, else_branch)
+    expr = _phase_expr(n - 1)
+    for i in range(n - 2, -1, -1):
+        expr = f"if(lt(on,{boundaries[i]}),{_phase_expr(i)},{expr})"
+
+    return f"if(gt(on,0),{expr},1.0)"
+
+
+def _build_zoompan_x_multikey(total_frames: int, phases: list[dict]) -> str:
+    """
+    多关键帧 Pan 表达式：每段独立控制水平偏移方向和幅度。
+
+    phases: [{"pct": 0.35, "pan_pct": -0.005, "easing": "smoothstep"}, ...]
+    pan_pct 正=右移, 负=左移，值是对 iw 的百分比。
+    """
+    if total_frames <= 0 or not phases:
+        return "iw/2-(iw/zoom/2)"
+
+    n = len(phases)
+    cum = 0
+    boundaries = []
+    for p in phases:
+        cum += max(1, int(total_frames * p["pct"]))
+        boundaries.append(cum)
+
+    # 累计偏移：每段结束时累计的总偏移量（iw 的百分比）
+    pan_cum = [0.0]
+    for p in phases:
+        pan_cum.append(pan_cum[-1] + p.get("pan_pct", 0.0))
+
+    def _phase_x_expr(i: int) -> str:
+        """第 i 段的 x 偏移表达式"""
+        dp = phases[i].get("pan_pct", 0.0)
+        prev_b = boundaries[i - 1] if i > 0 else 0
+        curr_b = boundaries[i]
+        base_offset = pan_cum[i]  # 本段开始时的累计偏移
+        if abs(dp) < 0.0001:
+            return f"iw/2-(iw/zoom/2)-iw*{base_offset:.4f}"
+        t = f"(on-{prev_b})/{curr_b - prev_b}"
+        # 段内 smoothstep 缓动
+        eased = f"(3*pow({t},2)-2*pow({t},3))"
+        return f"iw/2-(iw/zoom/2)-iw*({base_offset:.4f}+{dp:.4f}*{eased})"
+
+    expr = _phase_x_expr(n - 1)
+    for i in range(n - 2, -1, -1):
+        expr = f"if(lt(on,{boundaries[i]}),{_phase_x_expr(i)},{expr})"
+
+    return expr
+
+
+def _bench_keyframes(duration_sec: float) -> tuple[list[dict], list[dict]]:
+    """
+    Bench card 默认 3 段式 Ken Burns 关键帧。
+
+    Returns:
+        (zoom_phases, pan_phases)
+    """
+    # 根据时长微调 zoom 幅度（长片段给更多运动空间）
+    if duration_sec < 4:
+        z1, z2, z3 = 1.03, 1.09, 1.11
+    elif duration_sec < 8:
+        z1, z2, z3 = 1.04, 1.12, 1.15
+    else:
+        z1, z2, z3 = 1.05, 1.14, 1.18
+
+    zoom_phases = [
+        {"pct": 0.35, "zoom_end": z1, "easing": "smoothstep"},   # establish: 慢起
+        {"pct": 0.35, "zoom_end": z2, "easing": "smoothstep"},   # develop: 推进
+        {"pct": 0.30, "zoom_end": z3, "easing": "smoothstep"},   # resolve: 缓出
+    ]
+    pan_phases = [
+        {"pct": 0.35, "pan_pct": -0.005, "easing": "smoothstep"},  # establish: 微右移（安定感）
+        {"pct": 0.35, "pan_pct": 0.030,  "easing": "smoothstep"},  # develop: 左移（引导视线）
+        {"pct": 0.30, "pan_pct": 0.000,  "easing": "smoothstep"},  # resolve: 不动（稳定收束）
+    ]
+    return zoom_phases, pan_phases
+
+
 # ============== 辅助工具 ==============
 
 def _find_chinese_font() -> str:
@@ -928,12 +1050,15 @@ def create_card_pure_clip(
     out_w: int = 1080,
     out_h: int = 608,
     max_zoom: float = 1.20,
+    keyframes: list[dict] = None,
 ) -> bool:
     """
-    v10.1 骨肉分离：纯画面 Ken Burns 片段（4x 超采样 zoompan，零抖动 + 缓入弹入）。
+    v11 骨肉分离：纯画面 Ken Burns 片段（4x 超采样 zoompan，支持多关键帧）。
 
-    滤镜链：scale→crop→4x预放大→zoompan(smoothstep+左移)→format
-    兼容 16:9（1280×720）和 9:16（1080×1920）两种源图。
+    滤镜链：scale→crop→4x预放大→zoompan→format
+
+    keyframes: 多段关键帧列表 [{"pct": 0.35, "zoom_end": 1.04, "easing": "smoothstep"}, ...]
+    传入时启用多段变速 Ken Burns，不传时走原单一 smoothstep 曲线（向后兼容）。
     """
     if not os.path.exists(image_path):
         print(f"[video:pure] 图片不存在: {image_path}")
@@ -943,8 +1068,33 @@ def create_card_pure_clip(
         return False
 
     total_frames = max(1, int(duration_sec * fps))
-    z_expr = _build_zoompan_z_expr(total_frames, max_zoom)
-    x_expr = _build_zoompan_x_expr(total_frames, pan_pct=0.03)
+
+    if keyframes:
+        # v11 多关键帧模式
+        zoom_phases = keyframes
+        pan_phases = None
+        if isinstance(keyframes, tuple) and len(keyframes) == 2:
+            zoom_phases, pan_phases = keyframes[0], keyframes[1]
+
+        z_expr = _build_zoompan_z_multikey(total_frames, zoom_phases)
+        if pan_phases:
+            x_expr = _build_zoompan_x_multikey(total_frames, pan_phases)
+        else:
+            x_expr = "iw/2-(iw/zoom/2)"
+
+        z_ends = "→".join(f"{p['zoom_end']:.2f}" for p in zoom_phases)
+        print(
+            f"[video:pure] {duration_sec:.1f}s, {total_frames}frames, "
+            f"multikey zoom: 1.00→{z_ends}, 4x oversampled"
+        )
+    else:
+        # 原单一曲线（向后兼容）
+        z_expr = _build_zoompan_z_expr(total_frames, max_zoom)
+        x_expr = _build_zoompan_x_expr(total_frames, pan_pct=0.03)
+        print(
+            f"[video:pure] {duration_sec:.1f}s, {total_frames}frames, "
+            f"zoom: 1.00→{max_zoom:.2f}(eased), 4x oversampled"
+        )
 
     vf_chain = (
         f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase:flags=bicubic,"
@@ -968,11 +1118,6 @@ def create_card_pure_clip(
         "-an",
         output_path,
     ]
-
-    print(
-        f"[video:pure] {duration_sec:.1f}s, {total_frames}frames, "
-        f"zoom: 1.00→{max_zoom:.2f}(eased), 4x oversampled"
-    )
 
     try:
         result = _run_ffmpeg(cmd, timeout=120, description=f"纯画面 {output_path}")
@@ -1252,6 +1397,89 @@ def concat_clips(clip_paths: list[str], output_path: str) -> bool:
         except Exception:
             pass
         print(f"[video:concat] 异常: {e}")
+        return False
+
+
+def concat_clips_xfade(
+    clip_paths: list[str],
+    durations: list[float],
+    output_path: str,
+    transition_dur: float = 0.5,
+    fps: int = 30,
+) -> bool:
+    """
+    使用 FFmpeg xfade 滤镜在片段之间加入平滑交叉淡入淡出转场。
+
+    过渡采用 dissolve（叠化），避免硬切。
+    """
+    if len(clip_paths) < 1:
+        print("[video:xfade] 无片段")
+        return False
+    if len(clip_paths) == 1:
+        import shutil
+        shutil.copy2(clip_paths[0], output_path)
+        return True
+
+    T = transition_dur
+    n = len(clip_paths)
+
+    # 构建输入参数
+    inputs = []
+    for p in clip_paths:
+        inputs.extend(["-i", p])
+
+    # 构建 xfade filter_complex
+    xfade_parts = []
+    merged_dur = durations[0]  # 合并输出的累计时长
+
+    for i in range(n - 1):
+        if i == 0:
+            label_in0 = "0"
+            label_in1 = "1"
+        else:
+            label_in0 = f"v{i}"
+            label_in1 = str(i + 1)
+
+        label_out = f"v{i + 1}"
+        # offset: 在第一个输入中的什么时刻开始转场（结束前 T 秒）
+        offset = max(0.0, merged_dur - T)
+        xfade_parts.append(
+            f"[{label_in0}][{label_in1}]xfade=transition=fade:"
+            f"duration={T:.3f}:offset={offset:.3f}[{label_out}]"
+        )
+        # 更新合并输出时长
+        merged_dur = merged_dur + durations[i + 1] - T
+
+    cum_dur = merged_dur
+
+    filter_complex = ";".join(xfade_parts)
+    cmd = [
+        "ffmpeg", "-y",
+        *inputs,
+        "-filter_complex", filter_complex,
+        "-map", f"[v{n - 1}]",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        output_path,
+    ]
+
+    print(
+        f"[video:xfade] {n} clips xfade, T={T:.1f}s, "
+        f"total ≈{cum_dur:.0f}s → {output_path}"
+    )
+
+    try:
+        result = _run_ffmpeg(cmd, timeout=600, description=f"xfade {n} clips")
+        if result.returncode != 0:
+            err = (result.stderr or "")[-400:]
+            print(f"[video:xfade] 失败: {err}")
+            return False
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+    except Exception as e:
+        print(f"[video:xfade] 异常: {e}")
         return False
 
 
@@ -3081,6 +3309,7 @@ async def compose_final_video_card_bench(
             img_path = ph_img
 
         clip_path = os.path.join(clips_dir, f"pure_{i:03d}.mp4")
+        kf = _bench_keyframes(dur)  # v11: 3 段式 Ken Burns
         ok = create_card_pure_clip(
             image_path=img_path,
             output_path=clip_path,
@@ -3089,6 +3318,7 @@ async def compose_final_video_card_bench(
             out_w=IMG_W,
             out_h=IMG_H,
             max_zoom=_calc_max_zoom(dur),
+            keyframes=kf,
         )
 
         if ok:
@@ -3119,6 +3349,7 @@ async def compose_final_video_card_bench(
     # v9 改为逐段独立复合：每段单独 background + overlay + drawtext，
     # 单段失败自动占位保护 A/V 同步。
     composite_clips = []
+    composite_durs = []  # v11: 对应每段时长，供 xfade 转场使用
     composite_success = 0
 
     for i, (sentence, dur) in enumerate(zip(sentences, seg_durations)):
@@ -3132,6 +3363,7 @@ async def compose_final_video_card_bench(
             if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
                                               label=f"bench full seg{i}"):
                 composite_clips.append(ph_path)
+                composite_durs.append(dur)
                 placeholder_count += 1
             continue
 
@@ -3152,6 +3384,7 @@ async def compose_final_video_card_bench(
 
         if ok:
             composite_clips.append(comp_path)
+            composite_durs.append(dur)
             composite_success += 1
         else:
             print(f"[video:bench] composite seg {i+1}/{len(sentences)} FAIL → 占位 {dur:.1f}s")
@@ -3159,6 +3392,7 @@ async def compose_final_video_card_bench(
             if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
                                               label=f"bench full seg{i}"):
                 composite_clips.append(ph_path)
+                composite_durs.append(dur)
                 placeholder_count += 1
 
         if (i + 1) % 15 == 0 or i == len(sentences) - 1:
@@ -3167,10 +3401,13 @@ async def compose_final_video_card_bench(
     if not composite_clips:
         return {"error": "所有片段复合失败", "segment_count": success_count}
 
-    # ---- 拼接所有复合片段 ----
+    # ---- v11: xfade 叠化拼接（替代硬切）----
     concat_path = os.path.join(task_dir, "concat_bench.mp4")
-    if not concat_clips(composite_clips, concat_path):
-        return {"error": "片段拼接失败", "segment_count": success_count}
+    if not concat_clips_xfade(composite_clips, composite_durs, concat_path, transition_dur=0.5):
+        # 降级：普通硬拼接
+        print("[video:bench] xfade 失败，降级为硬拼接")
+        if not concat_clips(composite_clips, concat_path):
+            return {"error": "片段拼接失败", "segment_count": success_count}
 
     for bv in composite_clips:
         try:

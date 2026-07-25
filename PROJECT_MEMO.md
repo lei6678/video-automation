@@ -1,5 +1,40 @@
 # 项目备忘录
 
+## 2026-07-25 A/B 双任务推进
+
+### A 任务：v7 生图质量（✅ 完成）
+
+Gemini 三份分析报告驱动，对标视频 Midjourney V6 + --cref 技术栈：
+- `EMOTION_LIGHTING`：glory/tragedy/transition/daily 四档动态光影
+- `STYLE_LOCK`：王家卫电影美学全局风格锁（85mm/浅景深/bokeh/超写实）
+- `plan_visual_arc()`：LLM 通读全文 → 主角档案 + 逐段场景 + 情绪标签
+- `build_single_segment_prompt()`：主角+场景+光影+风格锁 四段式 prompt
+- 对标测试：gpt-image-2 > flux-dev > flux-pro（质感和美感维度）
+- `max_tokens`：4096→8192（防 26 段 JSON 截断）
+- 修复 `split_title_two_lines`：deepseek-chat→deepseek-v4-flash（标题分行失效问题）
+- Git commit: `8919055` v7: Gemini情绪光影框架落地
+
+### B 任务：Ken Burns 多关键帧 + 叠化转场（✅ 进行中）
+
+**多关键帧动效**：
+- `_build_zoompan_z_multikey()`：嵌套 if(lt(on,...)) 分段 zoom 曲线
+- `_build_zoompan_x_multikey()`：分段 pan（微右→左移→不动）
+- `_bench_keyframes()`：3 段式预设（establish 35% / develop 35% / resolve 30%）
+
+**xfade 叠化转场**：
+- `concat_clips_xfade()`：FFmpeg xfade=fade 替代硬拼接
+- 26 段 0.5s 叠化，总时长从 432.9s → 420.4s（重叠 12.5s）
+- 修复 offset 计算 bug（第二段起用累计时长而非原始时长）
+
+**待修复**：字幕时间轴与 xfade 后画面不同步（明天）
+
+### 明天计划
+
+1. 修复 xfade 后字幕时间轴偏移
+2. Ken Burns 动效精细调参
+3. 完整工作流端到端验证（task 6）
+
+---
 ## 2026-07-24（下午）竞品研究 + 权限优化 + Git 安全加固
 
 ### 一、竞品研究：Codex + HyperFrames/Remotion 自动化视频工作流
