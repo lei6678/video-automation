@@ -1,13 +1,13 @@
 """
-配图生成服务 — Fal.ai gpt-image-2 主 · 可灵备 — v3
+配图生成服务 — Fal.ai gpt-image-2 主 · 可灵备 — v5
 ================================================
-1. 按句切片（每句 ~60 字 / 约 18 秒口播）
-2. 每 9 句一组构建 3×3 九宫格 Prompt
-3. 调用 Fal.ai gpt-image-2 生成九宫格总图（3840×2160, low quality）
-4. PIL 裁切：16:9 格子 → 中心裁 9:16 → 1080×1920 竖屏
+1. LLM 通读全文 → 规划全局视觉弧线 + 逐段画面 Prompt（plan_visual_arc）
+2. 混合 Prompt：中文文化场景 + 英文视觉词汇 → Fal.ai 单图直生
+3. 4x 超采样（2160×2432 → 1080×1214 LANCZOS），quality="medium"
+4. 多通道降级：Fal → 降敏 Fal → Keling → 通用兜底
 5. 写入 TaskImage 表
 
-成本: 7 组九宫格 × $0.012 ≈ $0.084（约 0.6 元人民币）
+成本: 1 次 DeepSeek（~1美分） + N×Fal.ai（~0.5美分/张）
 """
 
 import asyncio
@@ -27,7 +27,7 @@ load_dotenv()
 
 # ============== 凭证 ==============
 FAL_KEY = os.getenv("FAL_KEY", "")
-FAL_QUALITY = os.getenv("FAL_QUALITY", "low")  # low | medium | high，默认 low
+FAL_QUALITY = os.getenv("FAL_QUALITY", "medium")  # low | medium | high，默认 medium（v5 品质提升）
 
 KELING_API_KEY = os.getenv("KELING_API_KEY", "")
 KELING_BASE_URL = os.getenv("KELING_BASE_URL", "https://api.kuaishou.com/keling/v1")
@@ -39,54 +39,151 @@ KELING_IMAGE_MODEL = "keling-v1"
 
 # ============== 样式圣经库（来自大佬白皮书）==============
 
+# ============== 视觉风格配方（v5：中文文化场景 + 英文视觉词汇）==============
+
 STYLE_BIBLES = {
     "default": (
-        "固定美术方向:明亮电影感真实摄影，安静、克制、有知识短视频质感。"
-        "固定色彩:暖白、浅木色、柔和灰蓝、低饱和绿色，少量温暖阳光点缀。"
-        "固定光线:窗边自然光、清晨或傍晚柔光，阴影干净，整体曝光偏明亮。"
-        "固定镜头:35mm/50mm人文镜头语言，主体明确，背景简洁。"
-        "人物气质:普通成年人，安静、理性、克制，优先背影、侧影、手部动作和生活场景。"
-        "所有图片必须共享同一套色彩、光线、镜头、人物气质、材质和时代感。"
+        "cinematic realism, natural window lighting, soft diffused shadows, "
+        "warm whites + muted wood tones + dusty blues, 35mm/50mm prime lens, "
+        "shallow depth of field, clean composition, editorial photography, "
+        "ordinary people in quiet moments, backs and profiles preferred, "
+        "film grain subtle, Kodak Portra color palette"
     ),
     "warm_book": (
-        "温暖治愈书单风。暖黄光线，柔焦质感，仿佛午后窗边翻书的氛围。"
-        "色调偏奶油色+琥珀色，画面像旧胶片相机拍摄。"
-        "常见元素：书架一角、茶杯、绿植、阳光透过窗帘、手写字条。"
+        "warm golden hour sunlight through windows, cream + amber tones, "
+        "soft focus, cozy reading nook atmosphere, vintage film camera aesthetic, "
+        "bookshelf corner, teacup, green plants, handwritten notes, "
+        "afternoon stillness, gentle bokeh, 85mm portrait lens"
     ),
     "clean_health": (
-        "明亮干净的健康生活方式风。清晨自然光，白色+浅木色为主调。"
-        "场景：厨房备餐、晨跑背影、公园长椅、水杯特写、瑜伽垫一角。"
-        "传达平静、自律、积极的生活态度，避免医疗感。"
+        "bright morning daylight, white + light wood dominant, "
+        "clean minimal composition, positive calm energy, "
+        "kitchen prep, morning jog silhouette, park bench, water glass close-up, "
+        "commercial lifestyle photography, airy spacious feel, no medical aesthetic"
     ),
     "philosophy": (
-        "哲学思辨风。广角远景，人物渺小于自然或城市之中。"
-        "冷暖对比色调，画面留白多，有呼吸感。"
-        "场景：海边独行、山顶远眺、城市天台、空旷图书馆。"
-        "传达人生感悟、认知成长的深邃感。"
+        "wide angle distant view, small figure in vast landscape or city, "
+        "cool-warm color contrast, generous negative space, breathing room, "
+        "solitary walk on coastline, mountain summit vista, rooftop at dusk, empty library, "
+        "contemplative depth, Terrence Malick golden hour, anamorphic lens feel"
     ),
     "documentary_realism": (
-        "纪实摄影风，拒绝美化贫困与苦难。"
-        "冷灰主色调，低饱和、低曝光、暗调阴影，硬侧光或阴天散射光。"
-        "粗粝质感，不完美构图，允许破旧的墙壁、斑驳的地面、磨损的衣物、简陋的家具。"
-        "场景真实破败但不过度渲染：老式平房、水泥地面铁管床、旧棉被堆叠、煤炉取暖、昏黄灯泡、开裂的木桌。"
-        "拒绝暖色滤镜、拒绝日系小清新、拒绝温馨柔光——这不是向往的生活，这是需要逃离的处境。"
-        "人物表情克制但疲惫，肢体语言传达压抑与坚韧并存。"
+        "gritty documentary photography, desaturated cold grey tones, "
+        "low exposure, harsh side light or overcast diffused light, deep shadows, "
+        "weathered textures, imperfect composition, peeling walls, cracked floors, "
+        "worn clothing, sparse furniture, unpolished realism, reportage style, "
+        "no warm filters, no softening, no glamour — this is hardship, not nostalgia, "
+        "restrained facial expressions, body language conveying endurance"
     ),
 }
 
-# ============== 风格后缀映射（注入 Fal.ai prompt 末端）==============
+# ============== 风格后缀（v5：英文视觉修饰词，注入 Fal.ai prompt）==============
 
 STYLE_PROMPT_MAP = {
-    "default": ", cinematic lighting, photorealistic, 35mm lens, depth of field",
-    "warm_book": ", warm pastel colors, soft morning sunlight, cozy atmosphere, studio Ghibli aesthetic style",
-    "clean_health": ", bright natural lighting, clean minimalism, vibrant colors, commercial photography",
-    "philosophy": ", moody dramatic lighting, melancholic low key tone, surrealism artistic texture",
-    "documentary_realism": ", gritty documentary photography, desaturated cold tones, harsh shadows, unpolished realism, reportage style, no glamour no beauty filter",
+    "default": (
+        ", cinematic lighting, photorealistic, 35mm prime lens, "
+        "shallow depth of field, Kodak Portra 400 color, film grain subtle"
+    ),
+    "warm_book": (
+        ", warm pastel colors, soft morning sunlight, cozy atmosphere, "
+        "golden hour glow, cream and amber palette, vintage film aesthetic"
+    ),
+    "clean_health": (
+        ", bright natural daylight, clean minimal composition, "
+        "vibrant yet natural colors, commercial lifestyle photography, airy spacious"
+    ),
+    "philosophy": (
+        ", moody dramatic lighting, melancholic low key, surrealism texture, "
+        "wide landscape scale, anamorphic lens feel, contemplative atmosphere"
+    ),
+    "documentary_realism": (
+        ", gritty documentary photography, desaturated cold tones, "
+        "harsh available light, unpolished realism, reportage style, "
+        "no glamour, no beauty filter, no retouching"
+    ),
 }
 
-# ============== 画面后置防线（防崩坏补丁）==============
+# ============== 画面后置防线 ==============
 
-SAFETY_SUFFIX = ", highly detailed faces, no duplicate characters, perfect anatomy, masterpiece"
+SAFETY_SUFFIX = (
+    ", highly detailed, natural skin texture, no duplicate faces, "
+    "masterpiece composition, no text, no watermark, no graphic overlay"
+)
+
+# ============== v5：全局视觉规划（LLM 通读全文 → 逐段画面 Prompt）==============
+
+async def plan_visual_arc(
+    rewritten_transcript: str,
+    book_title: str = "",
+    book_author: str = "",
+    visual_context: str = "",
+    style: str = "default",
+    total_segments: int = 1,
+) -> dict:
+    """
+    v5 核心：LLM 通读全文 → 输出全局视觉方向（单次 API，短平快）。
+    """
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not deepseek_key:
+        print("[image:plan] DEEPSEEK_API_KEY not set, skip")
+        return {}
+
+    system_prompt = (
+        "You are a cinematographer. Read the full story and output a JSON with three keys:\n"
+        '- "global_style": overall visual language in English photography terms '
+        "(lighting, lens, texture, color palette, era mood) — 60-120 words\n"
+        '- "color_arc": how colors evolve with the narrative arc in English — 20-50 words\n'
+        '- "era_notes": key era/environment details in Chinese (年代, 地点, 典型场景) — 20-60 words\n'
+        "Output pure JSON only, no markdown."
+    )
+
+    context_block = ""
+    if visual_context.strip():
+        context_block = f"\nCharacter ref: {visual_context.strip()[:200]}"
+
+    user_prompt = (
+        f"Title: {book_title or 'N/A'}\nAuthor: {book_author or 'N/A'}\n"
+        f"Style: {style}\nSegments: {total_segments}\n"
+        f"{context_block}\n"
+        f"=== STORY ===\n{rewritten_transcript.strip()}\n=== END ===\n"
+        f"Output the JSON now."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            resp = await http.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-v4-pro",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 1024,
+                    "response_format": {"type": "json_object"},
+                },
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1].rstrip("```").strip()
+                plan = json.loads(content)
+                gs = plan.get("global_style", "")
+                print(f"[image:plan] OK — style={len(gs)}chars, keys={list(plan.keys())}")
+                return plan
+            else:
+                print(f"[image:plan] API error {resp.status_code}: {resp.text[:200]}")
+                return {}
+    except Exception as e:
+        print(f"[image:plan] Failed: {type(e).__name__}: {e}")
+        return {}
+
 
 # 句切分结果缓存：避免轮询期间每次请求都重新 split_into_short_sentences()
 # key = (task_id, rewritten_mtime), value = list[str]
@@ -435,76 +532,58 @@ def build_single_segment_prompt(
     style_bible: str = "",
     aspect_ratio: str = "9:16",
     visual_context: str = "",
+    visual_plan: Optional[dict] = None,
 ) -> str:
     """
-    构建单句配图 User Prompt（v4：单图直生，无九宫格）。
+    v5 构建单句配图 Prompt（描述体，无元指令）。
 
-    新增 visual_context 参数：LLM 从改写稿中提取的主人公视觉档案，
-    注入到每张图的 prompt 中，确保人物一致性。
+    优先使用 visual_plan（LLM 全局规划结果），
+    降级时沿用旧版 style_bible 模板。
+
+    最终 prompt 格式：
+    [中文场景描述]。[英文视觉词汇]。全局风格 + 质量词。
     """
+    # === v5 优先：使用 LLM 全局视觉方向 ===
+    if visual_plan:
+        global_style = visual_plan.get("global_style", "")
+        color_arc = visual_plan.get("color_arc", "")
+        era_notes = visual_plan.get("era_notes", "")
+        if global_style:
+            # 混合 prompt：中文场景内容 + 英文视觉风格 + 色调弧线
+            prompt = (
+                f"{text.strip()} "
+                f"{global_style}. "
+                f"Color progression: {color_arc}. "
+                f"no text, no watermark"
+            )
+            seg_count = visual_plan.get("_total_segments", total_segments)
+            print(
+                f"[image:prompt] seg {segment_index} v5全局规划, "
+                f"len={len(prompt)} (text={len(text.strip())}+style={len(global_style)})"
+            )
+            return prompt
+
+    # === 降级：旧版模板（无 visual_plan 时使用）===
     if not style_bible:
         style_bible = STYLE_BIBLES.get("default", "")
 
-    # 构建视觉档案注入段落（如果有的话）
-    visual_block = ""
-    if visual_context.strip():
-        # 检测视觉档案是否涉及年龄跨度
-        import re as _re
-        _has_age_span = bool(_re.search(r'\d+岁[→\-~至到]+\d+岁|年龄|年龄段|年轻时|年轻时|年老时|中年|老年|少年|青年|老去|变老',
-                                        visual_context))
-        _age_note = ""
-        if _has_age_span:
-            _age_note = (
-                "\n⚠️ 年龄动态提示：视觉档案描述的是角色一生的外貌变化范围，"
-                "不是所有镜头的统一模板。请根据【当前段落文案】的具体剧情阶段来推断角色"
-                "此时此刻的实际年龄和形象（少年/青年/中年/老年），不要把所有镜头都画成同一个年龄。"
-            )
-        visual_block = f"""\n\n配图视觉档案（角色可变特征参考，根据当前段落时间点灵活调整）：
-{visual_context.strip()}
-{_age_note}
-"""
-
-    # 8:9 近方形卡片版式：额外构图约束（对标满宽大图展示区）
+    # 8:9 竖版构图约束
     if aspect_ratio == "8:9":
-        aspect_line = (
-            "8:9 近正方形竖版构图，主体居中、略偏上，四周留出呼吸空间，"
-            "关键元素不贴边（成片满宽出血展示，无裁切余量）"
+        aspect_hint = (
+            "8:9 near-square vertical composition, subject centered slightly upper, "
+            "breathing room on all sides, full-bleed display with no crop margin"
         )
     else:
-        aspect_line = f"{aspect_ratio}，主体放在中央安全区，方便后期排版。"
+        aspect_hint = f"{aspect_ratio} vertical, subject in safe center zone"
 
-    prompt = f"""为中文短视频口播生成一张独立意境配图。
-
-最终用途:
-这张图作为短视频的连续分镜之一，对应一段约 18 秒的口播配音。
-
-画幅要求:
-{aspect_line}
-
-主题方向:
-图书启发、认知成长、人生感悟、关系洞察、命运转折。
-
-统一视觉风格:
-{style_bible}
-
-风格要求:
-明亮电影感，真实摄影或高级插画风
-光线自然，画面干净，低信息密度
-与同一条视频的其他配图保持相同视觉调性
-{visual_block}
-内容来源限制:
-只参考当前段落文案，不引用原视频标题、账号、作者或来源信息。
-
-整条视频主题:{book_title}
-书籍作者:{book_author}
-当前分镜序号:第 {segment_index + 1}/{total_segments} 镜
-
-当前段落文案:
-{text.strip()}
-
-请直接生成单张配图。
-不要在图片里放任何文字。
-不要输出解释。"""
+    # 将中文文案转化为画面描述（而非指令）
+    prompt = (
+        f"A cinematic vertical composition, {aspect_hint}. "
+        f"Scene inspired by the following narrative: {text.strip()} "
+        f"Visual style: {style_bible}. "
+        f"no text, no watermark, no graphic overlay"
+    )
+    print(f"[image:prompt] seg {segment_index} 降级模板, len={len(prompt)}")
     return prompt
 
 
@@ -721,19 +800,16 @@ async def generate_all_images(
     aspect_ratio: str = "9:16",
 ) -> dict:
     """
-    v4 单图直生：每个句段独立请求 Fal.ai 生成一张高精单图。
-
-    彻底废弃 v3 九宫格模式，解决：
-    - 人像重影、肢体多指、面部表情扭曲崩坏
-    - 裁切导致构图失控、焦点失焦
+    v5 单图直生 + LLM 全局视觉规划。
 
     流程:
-    0. 从改写稿提取视觉档案（LLM）→ 注入全局人物一致性上下文
+    0. extract_visual_context → 提取角色档案
+    0.5 plan_visual_arc → LLM 通读全文 → 逐段画面 Prompt（v5 新增）
     1. 读取 rewritten.txt → split_into_short_sentences() 切句
-    2. for each sentence → build_single_segment_prompt + visual_context + STYLE_PROMPT_MAP + SAFETY_SUFFIX
-    3. Fal.ai gpt-image-2 单图直生（按 aspect_ratio 决定尺寸）
+    2. for each sentence → build_single_segment_prompt(visual_plan)
+    3. Fal.ai gpt-image-2 单图直生（quality="medium", 4x 超采样）
     4. PIL resize 到精确目标分辨率 → 写入 TaskImage 表
-    5. 异常兜底：单张失败不阻塞后续 → 降敏 → 通用 prompt → 占位图
+    5. 异常兜底：单张失败不阻塞后续 → 降敏 → LLM 改写 → 通用 prompt → 占位图
 
     Returns:
         {"total_segments": N, "total_images": N, "success": N, "failed": N}
@@ -809,6 +885,22 @@ async def generate_all_images(
     else:
         print(f"[image:v4] 使用已缓存的视觉档案 ({len(visual_context)} 字)")
 
+    # ── Pass 0.5: v5 全局视觉规划（LLM 通读全文 → 逐段 Prompt）──
+    print(f"[image:v5] 启动全局视觉规划 (全文 {len(rewritten)} 字, {total_segments} 段)...")
+    visual_plan = await plan_visual_arc(
+        rewritten_transcript=rewritten,
+        book_title=book_title,
+        book_author=book_author,
+        visual_context=visual_context,
+        style=style,
+        total_segments=total_segments,
+    )
+    if visual_plan:
+        plan_segments = len(visual_plan.get("segments", []))
+        print(f"[image:v5] 视觉规划成功: {plan_segments} 个分镜方案")
+    else:
+        print("[image:v5] 视觉规划失败，降级为逐段模板模式")
+
     # 3. 根据画幅比确定请求尺寸与目标尺寸
     if aspect_ratio == "16:9":
         REQUEST_W, REQUEST_H = 3840, 2160
@@ -864,7 +956,7 @@ async def generate_all_images(
                 actual_style_bible = style_bible
                 actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
-            # 构建 Prompt
+            # 构建 Prompt（v5：优先使用 LLM 视觉规划）
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -874,6 +966,7 @@ async def generate_all_images(
                 style_bible=actual_style_bible,
                 aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
+                visual_plan=visual_plan,
             )
             final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
@@ -922,6 +1015,7 @@ async def generate_all_images(
                                 style_bible=actual_style_bible,
                                 aspect_ratio=aspect_ratio,
                                 visual_context=visual_context,
+                                visual_plan=visual_plan,
                             )
                             llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
                             print(f"[image:v4] 段 {seg_idx + 1} LLM 改写完成 → 重试 Fal.ai")
