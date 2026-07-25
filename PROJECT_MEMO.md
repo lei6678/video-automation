@@ -130,7 +130,29 @@ Fal.ai 语义级安全审查拒绝高度悲剧性内容（死亡、流血、极�
 
 ---
 
-## 明天计划（2026-07-19）
+## 2026-07-25 v5 图片生成重构（进行中）
+
+### 已完成
+- **竞品仓库研究**：bozhouDev/video-skills-toolkit 三模块分析（口播模板/手绘动画/字幕工具）
+- **对标视频颗粒度对比**：60fps vs 30fps，码率差5倍，图片质感碾压式差距，缩放动效单调
+- **v5 重构代码**（`image_service.py`，已提交 `b8cb0a2`）：
+  - `STYLE_BIBLES` + `STYLE_PROMPT_MAP` 从中文抽象 → 英文摄影术语
+  - `FAL_QUALITY` 默认值 `low` → `medium`
+  - 新增 `plan_visual_arc()` — LLM 通读全文 → 全局视觉方向（global_style + color_arc + era_notes）
+  - `build_single_segment_prompt()` 从指令体 → 描述体 + 支持 visual_plan
+  - `generate_all_images()` 集成 plan_visual_arc 调用链
+
+### 待完成（下次继续）
+- **plan_visual_arc 实机测试**：王人美文案调用后输出格式验证（上次因 token/超时问题未通过）
+- **真实生图对比**：新旧 prompt 各跑一段，对比 Fal.ai 输出质量
+- **Part B：Ken Burns 多关键帧动效**（方向多变 + ease-in-out）
+
+### 明天计划
+1. 完成 plan_visual_arc 调试与实机验证
+2. 新旧 prompt 对比生图测试（task 4 王人美文案）
+3. 开始 Part B：Zoom 动效预设系统
+
+### 2026-07-19（旧）
 
 1. **实机验证三连修复**：用 task 72 同类苦难叙事素材跑一次完整生图，观察并行速度、LLM 改写成功率、generic 兜底率。
 2. **LLM 改写 prompt 调优**：如果改写后 Fal.ai 仍拒绝率 > 20%，调整 `_llm_sanitize_segment` 的 system prompt（更激进地抽象化具象苦难描写）。
