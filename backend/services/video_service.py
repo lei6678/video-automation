@@ -2083,9 +2083,9 @@ def auto_publish_to_jianying(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(f"[jianying:publish] ✅ 已自动发送到剪映草稿箱: {draft_dest}")
-    print(f"[jianying:publish]    素材: {len(image_paths)} 图 + 1 音频 → {folder_name}")
-    print(f"[jianying:publish]    请打开剪映桌面版 → 「草稿」页面即可看到")
+    print(f"[jianying:publish] [OK] 已自动发送到剪映草稿箱: {draft_dest}")
+    print(f"[jianying:publish]    素材: {len(image_paths)} 图 + 1 音频 -> {folder_name}")
+    print(f"[jianying:publish]    请打开剪映桌面版 -> 「草稿」页面即可看到")
     return True
 
 # ============== 主入口：v3 1:1 绑定合成 ==============
@@ -3081,6 +3081,7 @@ def _composite_bench_segment(
     width: int = 1080,
     height: int = 1920,
     fps: int = 30,
+    xfade_offset: float = 0.0,
 ) -> bool:
     """
     v9 逐段复合（替代 v8 批量 filter_complex）。
@@ -3090,6 +3091,10 @@ def _composite_bench_segment(
 
     逐段编码消除了原 v8 批量复合的 FFmpeg 崩溃风险（enable 窗口跨段计算溢出），
     且在单段失败时可自动占位，保证 A/V 同步。
+
+    xfade_offset: xfade 叠化补偿偏移（秒）。首段为 0，后续每段均为 transition_dur。
+                 片段时长/背景色会相应延长，开头垫入同色背景 + 字幕整体后移，
+                 使得 xfade 吃掉的 transition_dur 恰好是垫片部分，内容零损失。
     """
     import os as _os
 
@@ -3182,6 +3187,7 @@ def _composite_bench_segment(
             )
 
     # 口播字幕（单段，自然断句 + enable 窗口）
+    total_dur = duration_sec + xfade_offset  # xfade 垫片补偿：延长片段以容纳字幕后移
     if sentence_text.strip():
         phrases = _split_natural_phrases(sentence_text.strip(), max_chars=14)
         phrase_cjk_counts = [_count_cjk(p) for p in phrases]
@@ -3196,6 +3202,10 @@ def _composite_bench_segment(
             if p_end > duration_sec - 0.3:
                 p_end = duration_sec
 
+            # xfade 垫片补偿：字幕整体后移 xfade_offset，开头垫片时间无字幕
+            sub_start = t_cursor + xfade_offset
+            sub_end = p_end + xfade_offset
+
             display = _strip_subtitle_punct(phrase)
             if display:
                 dt_parts.append(
@@ -3204,23 +3214,36 @@ def _composite_bench_segment(
                     f"x=(w-text_w)/2:y={_BENCH_SUB_Y}:"
                     f"shadowcolor=black@0.6:shadowx=2:shadowy=2:"
                     f"bordercolor=black@0.5:borderw=4:"
-                    f"enable='between(t,{t_cursor:.3f},{p_end:.3f})'"
+                    f"enable='between(t,{sub_start:.3f},{sub_end:.3f})'"
                 )
             t_cursor = p_end
             if t_cursor >= duration_sec:
                 break
 
-    # 组装 filter_complex
-    chain = f"[bg][0:v]overlay=0:{_BENCH_IMG_Y}:shortest=1"
-    if dt_parts:
-        chain += "," + ",".join(dt_parts)
-    chain += ",format=yuv420p[outv]"
+    # ---- 组装 filter_complex（xfade 垫片补偿版）----
+    if xfade_offset > 0:
+        # 开头垫入同色背景 + 纯画面用 setpts 后移，保证 xfade 吃掉的恰好是垫片
+        chain_body = ",".join(dt_parts) if dt_parts else ""
+        filter_complex = (
+            f"color=c={_BENCH_BG}:s={width}x{height}:d={total_dur}:r={fps},"
+            f"format=yuv420p[bg];"
+            f"[0:v]setpts=PTS+{xfade_offset:.3f}/TB[padded];"
+            f"[bg][padded]overlay=0:{_BENCH_IMG_Y}[ovl];"
+            f"[ovl]{chain_body}"
+            f"{',' if chain_body else ''}"
+            f"format=yuv420p[outv]"
+        )
+    else:
+        chain = f"[bg][0:v]overlay=0:{_BENCH_IMG_Y}:shortest=1"
+        if dt_parts:
+            chain += "," + ",".join(dt_parts)
+        chain += ",format=yuv420p[outv]"
 
-    filter_complex = (
-        f"color=c={_BENCH_BG}:s={width}x{height}:d={duration_sec}:r={fps},"
-        f"format=yuv420p[bg];"
-        + chain
-    )
+        filter_complex = (
+            f"color=c={_BENCH_BG}:s={width}x{height}:d={duration_sec}:r={fps},"
+            f"format=yuv420p[bg];"
+            + chain
+        )
 
     cmd = [
         "ffmpeg", "-y",
@@ -3349,22 +3372,32 @@ async def compose_final_video_card_bench(
     # v9 改为逐段独立复合：每段单独 background + overlay + drawtext，
     # 单段失败自动占位保护 A/V 同步。
     composite_clips = []
-    composite_durs = []  # v11: 对应每段时长，供 xfade 转场使用
+    composite_durs = []  # v11: 对应每段实际文件时长（含 xfade 垫片），供 xfade 转场使用
     composite_success = 0
+    total_composited = 0  # 已复合片段计数（含占位），用于判断是否首段
+
+    XFADE_T = 0.5  # xfade 叠化时长，需与下方 concat_clips_xfade 的 transition_dur 保持一致
 
     for i, (sentence, dur) in enumerate(zip(sentences, seg_durations)):
         if dur < 0.3:
             continue
 
+        # xfade 垫片偏移：首段 0，后续每段 = XFADE_T
+        # 原理：xfade 使每段提前 T 秒出现，垫片补偿使得 xfade 吃掉的恰好是垫片
+        is_first = (total_composited == 0)
+        xfade_offset = 0.0 if is_first else XFADE_T
+
         pure_clip = pure_clip_paths[i] if i < len(pure_clip_paths) else None
         if not pure_clip or not os.path.exists(pure_clip):
-            # 纯画面片段生成失败 → 占位
+            # 纯画面片段生成失败 → 占位（也需垫片以保持 xfade 时间轴一致）
+            ph_dur = dur + xfade_offset
             ph_path = os.path.join(clips_dir, f"full_{i:03d}_ph.mp4")
-            if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
+            if create_silent_placeholder_clip(ph_path, ph_dur, width, height, fps,
                                               label=f"bench full seg{i}"):
                 composite_clips.append(ph_path)
-                composite_durs.append(dur)
+                composite_durs.append(ph_dur)
                 placeholder_count += 1
+            total_composited += 1
             continue
 
         comp_path = os.path.join(clips_dir, f"full_{i:03d}.mp4")
@@ -3380,20 +3413,24 @@ async def compose_final_video_card_bench(
             width=width,
             height=height,
             fps=fps,
+            xfade_offset=xfade_offset,
         )
 
         if ok:
             composite_clips.append(comp_path)
-            composite_durs.append(dur)
+            composite_durs.append(dur + xfade_offset)
             composite_success += 1
         else:
             print(f"[video:bench] composite seg {i+1}/{len(sentences)} FAIL → 占位 {dur:.1f}s")
+            ph_dur = dur + xfade_offset
             ph_path = os.path.join(clips_dir, f"full_{i:03d}_ph.mp4")
-            if create_silent_placeholder_clip(ph_path, dur, width, height, fps,
+            if create_silent_placeholder_clip(ph_path, ph_dur, width, height, fps,
                                               label=f"bench full seg{i}"):
                 composite_clips.append(ph_path)
-                composite_durs.append(dur)
+                composite_durs.append(ph_dur)
                 placeholder_count += 1
+
+        total_composited += 1
 
         if (i + 1) % 15 == 0 or i == len(sentences) - 1:
             print(f"[video:bench] composite {i+1}/{len(sentences)} OK {composite_success}")
