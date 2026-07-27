@@ -1,7 +1,6 @@
-"""最终测试：用 jianying_v11_service 生成 Task6 完整草稿"""
+"""测试：用 6轨正式版 v11 service 生成 Task6 草稿"""
 import os, sys, json
 
-# Add backend to path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from services.jianying_v11_service import export_jianying_draft_v11
@@ -58,14 +57,26 @@ if not os.path.exists(audio_path):
 audio_path = audio_path.replace("\\", "/")
 print(f"Audio: {audio_path}")
 
-# Generate!
-print("\nGenerating v11 draft...")
+# Titles
+import sqlite3
+db = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "app.db"))
+db.row_factory = sqlite3.Row
+task = db.execute("SELECT video_title FROM tasks WHERE id = 6").fetchone()
+db.close()
+
+video_title = task["video_title"] or ""
+
+# Generate
+print("\nGenerating 6-track v11 draft...")
 draft_dir = export_jianying_draft_v11(
     sentences=sentences,
     image_paths=image_paths,
     audio_path=audio_path,
     seg_durations_us=seg_durations_us,
-    draft_name="Task6",
+    draft_name="Task6_6T",
+    upper_title=video_title,
+    lower_title_1="- 品读传奇人生 -",
+    lower_title_2="图片由AI生成与网络下载  科普视频 无不良引导",
 )
 
 print(f"\nDone! Draft folder: {draft_dir}")
