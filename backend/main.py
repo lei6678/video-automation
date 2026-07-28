@@ -310,6 +310,7 @@ class GenerateImagesRequest(BaseModel):
     task_id: int
     style: str = "default"  # default | warm_book | clean_health | philosophy
     aspect_ratio: str = "9:16"  # "9:16" | "16:9"
+    force: bool = False  # True=强制重跑，忽略已有图片缓存和视觉档案缓存
 
 
 class GenerateImagesResponse(BaseModel):
@@ -1552,6 +1553,7 @@ async def generate_images(request: GenerateImagesRequest, db: Session = Depends(
             book_title=task.book_title or "",
             book_author=task.book_author or "",
             aspect_ratio=request.aspect_ratio,
+            force=request.force,
         )
     except Exception as e:
         # 生图过程异常崩了 → 复位 generating 标记，避免任务永久卡死

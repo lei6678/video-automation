@@ -144,10 +144,12 @@ function App() {
   const [selectedImageStyle, setSelectedImageStyle] = useState('default')
   const [selectedAspectRatio, setSelectedAspectRatio] = useState('16:9')  // v4: 16:9 横图 | 9:16 竖图
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)  // 轮询定时器
-  const [imageTotalExpected, setImageTotalExpected] = useState(0)  // 预期总张数
+
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null)  // 当前大图预览的段号
   const [isRegeneratingImage, setIsRegeneratingImage] = useState<number | null>(null)  // 正在单段重跑的段号
   const [imageSummary, setImageSummary] = useState<{total: number; success: number; failed: number; generating: boolean; complete: boolean} | null>(null)  // v9: 后端权威配图进度
+  const [, setImageTotalExpected] = useState(0)  // 预期总张数（仅 setter）
+  const [forceRegen, setForceRegen] = useState(false)  // 强制重跑：忽略已有图片+视觉档案缓存
   const [isVideoLoading, setIsVideoLoading] = useState(false)
   const [videoUrl, setVideoUrl] = useState('')
   const [videoMessage, setVideoMessage] = useState('')
@@ -458,7 +460,7 @@ function App() {
     fetch(`${API_BASE}/api/images/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, style: selectedImageStyle, aspect_ratio: selectedAspectRatio }),
+      body: JSON.stringify({ task_id: taskId, style: selectedImageStyle, aspect_ratio: selectedAspectRatio, force: forceRegen }),
     }).then(async (resp) => {
       const data = await resp.json()
       setImageTotalExpected(data.total_segments || 0)
@@ -1444,6 +1446,17 @@ function App() {
                   : imageSummary?.complete ? <><span>🔄</span><span>重新生成全部配图（{selectedAspectRatio} 单图直生）</span></>
                   : <><span>🎨</span><span>生成全部配图（{selectedAspectRatio} 单图直生）</span></>}
               </button>
+              <label className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border cursor-pointer select-none transition-colors ${
+                forceRegen ? 'bg-red-50 border-red-400 text-red-700' : 'bg-white border-gray-200 text-gray-500 hover:border-gray-300'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={forceRegen}
+                  onChange={(e) => setForceRegen(e.target.checked)}
+                  className="accent-red-500 w-3.5 h-3.5"
+                />
+                🗑️ 强制重跑（忽略缓存）
+              </label>
               <button
                 onClick={refreshImages}
                 disabled={!taskId}

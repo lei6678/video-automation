@@ -164,23 +164,40 @@ async def plan_visual_arc(
 
     system_prompt = (
         "You are a cinematographer directing a BIOGRAPHY film. "
-        "Determine the protagonist's gender from the text; never hardcode. "
+        "Determine the protagonist's gender STRICTLY from the text (look for 他/她/he/she/man/woman/boy/girl). "
+        "Never default to any gender. The examples in this prompt are format references ONLY — "
+        "always extract the ACTUAL gender from the story. "
         "The story has {total} numbered segments. Output JSON. ALL text in ENGLISH.\n\n"
-        "=== FACE AVOIDANCE RULE (CRITICAL) ===\n"
-        "The protagonist is a REAL historical figure. NEVER show a clear frontal face. "
-        "The face must occupy <15% of the frame. Use these techniques instead:\n"
-        "- Back view (figure seen from behind, facing away)\n"
-        "- Side profile with face turned away or obscured\n"
-        "- Silhouette against window/light/sunset\n"
-        "- Hands, gestures, body language close-ups (face out of frame)\n"
-        "- Environmental wide shots where the figure is small and distant\n"
-        "- Over-the-shoulder or partial frame (only back of head visible)\n\n"
+        "=== FACE POLICY (IMPORTANT — classify by public recognizability) ===\n"
+        "The ONLY question: does the audience KNOW what this person looks like?\n"
+        '- "show": protagonist is NOT a publicly-recognized figure. '
+        "No famous portrait exists in the public mind. This includes:\n"
+        "  · Ordinary people, unknown individuals, private citizens\n"
+        "  · Fictional characters from novels/stories\n"
+        "  · Ancient/historical figures with no widely-known portraits\n"
+        "  · Anyone the audience has no pre-existing mental image of\n"
+        "  → Normal portraiture, facial features, expressions, eye contact all OK.\n"
+        '- "avoid": protagonist IS a publicly-recognized figure whose face the '
+        "audience KNOWS. AI CANNOT replicate this face accurately. This includes:\n"
+        "  · Celebrities, public figures, politicians, national leaders\n"
+        "  · Famous historical figures with widely-known photographs/portraits\n"
+        "  · Anyone whose face would trigger 'that doesn't look like them'\n"
+        "  → NEVER show a clear frontal face. Face <15% of frame. Use instead:\n"
+        "  · Back view (seen from behind, facing away)\n"
+        "  · Side profile with face turned away or obscured\n"
+        "  · Silhouette against window/light/sunset\n"
+        "  · Hands, gestures, body language close-ups (face out of frame)\n"
+        "  · Environmental wide shots where figure is small and distant\n"
+        "  · Over-the-shoulder or partial frame (only back of head visible)\n"
+        "Rule of thumb: if you had to Google this person's face, "
+        "they're 'show'. If their face is on magazine covers, they're 'avoid'.\n\n"
         "=== EMOTION LIGHTING DICTIONARY (match each scene to one) ===\n"
         "1. glory (peak fame, success, joy): warm amber gold, bright marquee lights, high contrast\n"
         "2. tragedy (death, betrayal, persecution, asylum): cold cyan grey, desaturated, overcast, deep shadows\n"
         "3. transition (fleeing, journey, uncertainty): golden hour, sunset silhouette, rim light\n"
         "4. daily (learning, ordinary life): soft natural light, diffuse, neutral palette\n\n"
         "=== OUTPUT KEYS ===\n"
+        '- "face_policy": "show" or "avoid" — see FACE POLICY above.\n'
         '- "protagonist": fixed character reference for EVERY image. '
         "Describe gender, age range, key physical traits (hairstyle, typical clothing, body type). "
         "20-30 words. Example: 'Chinese man in his 20s, short hair, simple cotton shirt, lean build'.\n"
@@ -188,9 +205,9 @@ async def plan_visual_arc(
         '   - "emotion": one of [glory, tragedy, transition, daily]\n'
         '   - "scene": DETAILED English visual description, 15-30 words. '
         "MUST include: specific costume, specific prop or setting detail, "
-        "specific lighting source. Be VIVID — NOT 'girl in studio' but "
-        "'young woman in plain cotton qipao, hand on a wooden barre, "
-        "morning light streaming through tall windows of a 1930s Shanghai dance studio'. "
+        "specific lighting source. Be VIVID — NOT 'person in room' but "
+        "'young man in a worn denim jacket, leaning against a graffiti-covered wall, "
+        "golden hour light slicing through a narrow alley in Shenzhen'. "
         "IMPORTANT: describe the SCENE and ACTION, never describe the face.\n"
         '- "era_notes": atmosphere in Chinese, 20-40 words (for reference only)\n'
         "SAFETY: no deathbeds, no graves, no blood, no crying faces. "
@@ -657,7 +674,16 @@ def build_single_segment_prompt(
     # === v7 优先：主角 + 情绪光影 + 具象场景 + 全局风格锁 ===
     if visual_plan:
         protagonist = visual_plan.get("protagonist", "")
+        face_policy = visual_plan.get("face_policy", "show")
         scenes = visual_plan.get("scenes", [])
+
+        # 面孔策略：show=自由 / avoid=六法回避
+        _face_rules = {
+            "show": "",
+            "avoid": "FACE RULE: never show a clear frontal face — "
+                     "use back view, side profile, silhouette, or environmental wide shot. ",
+        }
+        face_rule = _face_rules.get(face_policy, "")
 
         if scenes and segment_index < len(scenes):
             entry = scenes[segment_index]
@@ -675,8 +701,7 @@ def build_single_segment_prompt(
                     f"Subject: {protagonist}. "
                     f"Scene: {scene_desc}. "
                     f"Lighting: {emotion_light}. "
-                    f"FACE RULE: never show a clear frontal face — "
-                    f"use back view, side profile, silhouette, or environmental wide shot. "
+                    f"{face_rule}"
                     f"{STYLE_LOCK}. "
                     f"single image, no text, no watermark"
                 )
@@ -703,8 +728,7 @@ def build_single_segment_prompt(
     prompt = (
         f"A cinematic vertical composition, {aspect_hint}. "
         f"Scene inspired by the following narrative: {text.strip()} "
-        f"FACE RULE: never show a clear frontal face — "
-        f"use back view, side profile, silhouette, or environmental wide shot. "
+        f""
         f"Visual style: {style_bible}. "
         f"no text, no watermark, no graphic overlay"
     )
@@ -1104,6 +1128,7 @@ async def generate_all_images(
     book_title: str = "",
     book_author: str = "",
     aspect_ratio: str = "9:16",
+    force: bool = False,
 ) -> dict:
     """
     v5 单图直生 + LLM 全局视觉规划。
@@ -1173,6 +1198,11 @@ async def generate_all_images(
 
     # ── Pass 0: 提取视觉档案 ──
     visual_context = task.visual_context or ""
+    if force and visual_context.strip():
+        print(f"[image:v4] force=true → 清除已缓存的视觉档案，重新提取")
+        task.visual_context = ""
+        db.commit()
+        visual_context = ""
     if not visual_context.strip():
         print(f"[image:v4] 视觉档案未缓存 → LLM 提取中...")
         try:
@@ -1244,9 +1274,12 @@ async def generate_all_images(
             target_path = os.path.join(images_dir, f"seg_{seg_idx:03d}.png")
 
             # 跳过已存在的成功图片（支持断点续跑）
-            if os.path.exists(target_path) and os.path.getsize(target_path) > 1000:
+            if not force and os.path.exists(target_path) and os.path.getsize(target_path) > 1000:
                 print(f"[image:v4] 段 {seg_idx + 1}/{total_segments} 已存在（并发检测），跳过")
                 return {"seg_idx": seg_idx, "status": "skipped", "target_path": target_path}
+            if force and os.path.exists(target_path):
+                print(f"[image:v4] force=true → 删除旧图 seg_{seg_idx:03d}.png")
+                os.remove(target_path)
 
             text_len = len(sentence.strip())
             print(
