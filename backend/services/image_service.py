@@ -163,18 +163,27 @@ async def plan_visual_arc(
         return {}
 
     system_prompt = (
-        "You are a cinematographer directing a BIOGRAPHY film about ONE woman. "
+        "You are a cinematographer directing a BIOGRAPHY film. "
+        "Determine the protagonist's gender from the text; never hardcode. "
         "The story has {total} numbered segments. Output JSON. ALL text in ENGLISH.\n\n"
+        "=== FACE AVOIDANCE RULE (CRITICAL) ===\n"
+        "The protagonist is a REAL historical figure. NEVER show a clear frontal face. "
+        "The face must occupy <15% of the frame. Use these techniques instead:\n"
+        "- Back view (figure seen from behind, facing away)\n"
+        "- Side profile with face turned away or obscured\n"
+        "- Silhouette against window/light/sunset\n"
+        "- Hands, gestures, body language close-ups (face out of frame)\n"
+        "- Environmental wide shots where the figure is small and distant\n"
+        "- Over-the-shoulder or partial frame (only back of head visible)\n\n"
         "=== EMOTION LIGHTING DICTIONARY (match each scene to one) ===\n"
         "1. glory (peak fame, success, joy): warm amber gold, bright marquee lights, high contrast\n"
         "2. tragedy (death, betrayal, persecution, asylum): cold cyan grey, desaturated, overcast, deep shadows\n"
         "3. transition (fleeing, journey, uncertainty): golden hour, sunset silhouette, rim light\n"
         "4. daily (learning, ordinary life): soft natural light, diffuse, neutral palette\n\n"
         "=== OUTPUT KEYS ===\n"
-        '- "protagonist": fixed character reference for EVERY image. Describe her as '
-        "East Asian Chinese woman, with key physical traits and how she ages (14→72). "
-        "Include specific visual cues: hairstyle (1930s wavy bob when young), "
-        "typical clothing (cheongsam/qipao, cotton dress), expression range. 20-30 words.\n"
+        '- "protagonist": fixed character reference for EVERY image. '
+        "Describe gender, age range, key physical traits (hairstyle, typical clothing, body type). "
+        "20-30 words. Example: 'Chinese man in his 20s, short hair, simple cotton shirt, lean build'.\n"
         '- "scenes": array of {total} objects, each with:\n'
         '   - "emotion": one of [glory, tragedy, transition, daily]\n'
         '   - "scene": DETAILED English visual description, 15-30 words. '
@@ -182,7 +191,7 @@ async def plan_visual_arc(
         "specific lighting source. Be VIVID — NOT 'girl in studio' but "
         "'young woman in plain cotton qipao, hand on a wooden barre, "
         "morning light streaming through tall windows of a 1930s Shanghai dance studio'. "
-        "The protagonist is the subject of EVERY scene.\n"
+        "IMPORTANT: describe the SCENE and ACTION, never describe the face.\n"
         '- "era_notes": atmosphere in Chinese, 20-40 words (for reference only)\n'
         "SAFETY: no deathbeds, no graves, no blood, no crying faces. "
         "Use poetic distance: an empty chair, light through a window, a silhouette.\n"
@@ -647,12 +656,11 @@ def build_single_segment_prompt(
     """
     # === v7 优先：主角 + 情绪光影 + 具象场景 + 全局风格锁 ===
     if visual_plan:
-        protagonist = visual_plan.get("protagonist", "East Asian woman")
+        protagonist = visual_plan.get("protagonist", "")
         scenes = visual_plan.get("scenes", [])
 
         if scenes and segment_index < len(scenes):
             entry = scenes[segment_index]
-            # 兼容两种格式：字符串或 {"emotion": ..., "scene": ...}
             if isinstance(entry, dict):
                 emotion = entry.get("emotion", "daily")
                 scene_desc = _sanitize_prompt(entry.get("scene", ""))
@@ -667,6 +675,8 @@ def build_single_segment_prompt(
                     f"Subject: {protagonist}. "
                     f"Scene: {scene_desc}. "
                     f"Lighting: {emotion_light}. "
+                    f"FACE RULE: never show a clear frontal face — "
+                    f"use back view, side profile, silhouette, or environmental wide shot. "
                     f"{STYLE_LOCK}. "
                     f"single image, no text, no watermark"
                 )
@@ -693,6 +703,8 @@ def build_single_segment_prompt(
     prompt = (
         f"A cinematic vertical composition, {aspect_hint}. "
         f"Scene inspired by the following narrative: {text.strip()} "
+        f"FACE RULE: never show a clear frontal face — "
+        f"use back view, side profile, silhouette, or environmental wide shot. "
         f"Visual style: {style_bible}. "
         f"no text, no watermark, no graphic overlay"
     )

@@ -1726,7 +1726,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         compose_final_video, compose_final_video_typewriter,
         compose_final_video_card, compose_final_video_card_v6,
         compose_final_video_card_bench, VIDEO_STYLES,
-        split_into_word_groups, get_audio_duration, auto_publish_to_jianying,
+        split_into_word_groups, get_audio_duration,
     )
     from services.llm_service import split_into_short_sentences
     import os as _os
@@ -1950,21 +1950,66 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         result_card if result_card else (result_cinematic if result_cinematic else result_tw)
     )
 
-    # === 剪映草稿：任何模式成功都重新生成（v8 修复：原来只有 cinematic 内部生成，
-    # bench/card 模式跑完后 task_dir 无 draft_content.json，自动发布静默跳过）===
+    # === 剪映 v11 草稿导出（matte 遮罩三轨分层架构）===
+    jianying_published = False
+    jianying_draft_name = None
     if primary and "error" not in primary:
         try:
-            from services.video_service import export_jianying_draft
-            export_jianying_draft(
-                task_id=task_id,
-                task_dir=task_dir,
+            from services.jianying_v11_service import export_jianying_draft_v11
+            from services.video_service import _find_bgm, BGM_VOLUME, BGM_FADE_SEC, get_audio_duration
+
+            draft_name = (request.video_title or f"Task_{task_id}").strip()
+            seg_durations_us = [d * 1_000_000 for d in seg_durations_shared]
+
+            # ★ BGM 混入：对标 FFmpeg 合成，剪映草稿也需要背景音乐
+            draft_audio = final_audio
+            bgm_path = _find_bgm()
+            if bgm_path and _os.path.exists(final_audio):
+                import subprocess as _sp
+                voice_dur = get_audio_duration(final_audio)
+                bg_chain = f"[1:a]volume={BGM_VOLUME}"
+                if voice_dur > BGM_FADE_SEC:
+                    bg_chain += f",afade=t=out:st={voice_dur - BGM_FADE_SEC:.2f}:d={BGM_FADE_SEC}"
+                bg_chain += "[bg]"
+                draft_audio = _os.path.join(task_dir, "_draft_mixed_audio.mp3")
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", final_audio,
+                    "-stream_loop", "-1", "-i", bgm_path,
+                    "-filter_complex",
+                    f"{bg_chain};[0:a][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]",
+                    "-map", "[aout]", "-c:a", "libmp3lame", "-b:a", "192k",
+                    "-shortest", draft_audio,
+                ]
+                _sp.run(cmd, capture_output=True, timeout=120)
+                if _os.path.exists(draft_audio) and _os.path.getsize(draft_audio) > 1000:
+                    print(f"[compose] BGM 已混入草稿音频: {draft_audio}")
+                else:
+                    draft_audio = final_audio  # 回退
+
+            print(f"[compose] disclaimer value: {repr(rendered_disclaimer)}")
+            print(f"[compose] slogan value: {repr(request.slogan)}")
+
+            draft_dir = await asyncio.to_thread(
+                export_jianying_draft_v11,
                 sentences=sentences,
-                seg_durations=seg_durations_shared,
                 image_paths=image_paths_shared,
-                audio_path=final_audio,
+                audio_path=draft_audio,
+                seg_durations_us=seg_durations_us,
+                draft_name=draft_name,
+                upper_title=request.video_title or "",
+                lower_title_1=request.slogan or "",
+                lower_title_2=request.subtitle_line or rendered_disclaimer or "",
             )
+            jianying_published = True
+            jianying_draft_name = draft_name
+            for bad in '<>:"/\\|?*':
+                jianying_draft_name = jianying_draft_name.replace(bad, "_")
+            print(f"[compose] v11 剪映草稿已导出: {draft_dir}")
         except Exception as e:
-            print(f"[compose] 剪映草稿生成失败: {e}")
+            print(f"[compose] v11 剪映草稿导出失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     # === 成品库归档：复制成片到统一平铺目录（v9：便于直接上传发布平台）===
     archive_path = None
@@ -1995,27 +2040,6 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
             print(f"[compose] 成片已归档: {dest}")
         except Exception as e:
             print(f"[compose] 成片归档失败（不影响成片）: {e}")
-
-    # === 自动发布到剪映草稿箱 ===
-    jianying_published = False
-    jianying_draft_name = None
-    try:
-        published = await asyncio.to_thread(
-            auto_publish_to_jianying,
-            task_id=task_id,
-            task_dir=task_dir,
-            image_paths=image_paths_shared,
-            audio_path=final_audio,
-            draft_name=request.video_title or f"Task_{task_id}",
-        )
-        jianying_published = published
-        if published:
-            jianying_draft_name = request.video_title or f"VideoAuto_Task_{task_id}"
-            # 去掉 Windows 文件名不允许的字符
-            for bad in '<>:"/\\|?*':
-                jianying_draft_name = jianying_draft_name.replace(bad, "_")
-    except Exception as e:
-        print(f"[compose] 自动发布到剪映失败: {e}")
 
     if "error" in primary:
         return ComposeVideoResponse(

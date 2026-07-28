@@ -76,7 +76,7 @@ FONT_DISC     = FONT_TITLE                            # 声明: 思源宋体 (�
 CLR_BG        = [0.027, 0.09, 0.188]   # #071730 藏青底板
 CLR_WHITE     = [0.984, 0.984, 0.969]  # #FBFBF7 标题白
 CLR_GOLD      = [0.788, 0.702, 0.549]  # #C9B38C 标题金
-CLR_SLOGAN    = [0.851, 0.733, 0.478]  # #D9BB7A 金色标语
+CLR_SLOGAN    = [0.843, 0.675, 0.392]  # #D7AC64 暖琥珀金标语（对标截图校准）
 CLR_SUB       = [0.996, 0.996, 0.988]  # #FEFEFC 口播字幕白
 CLR_DISC      = [0.129, 0.173, 0.251]  # #212C40 免责声明低对比灰
 CLR_BLACK     = [0.0, 0.0, 0.0]        # 字幕描边
@@ -466,7 +466,8 @@ def export_jianying_draft_v11(
     if title_line2:
         from services.video_service import _count_cjk as _cjk_count
         cjk = _cjk_count(title_line2)
-        if cjk > 16:
+        # ★ 降低阈值: ≥6 CJK 字即拆两行，确保上白下金格式始终生效
+        if cjk >= 6:
             # 策略1: 全文找第一个逗号/冒号/分号 → 天然语义断点 (同V5)
             split_pos = -1
             for bp in ("，", "；", "。", "：", "！", "？"):
@@ -489,7 +490,7 @@ def export_jianying_draft_v11(
             # 策略3: 无标点 → 按 CJK 字符数均分 (字数大致相等, 上白下金)
             if split_pos < 0:
                 cjk_chars = [ch for ch in title_line2 if '一' <= ch <= '鿿' or '㐀' <= ch <= '䶿']
-                if len(cjk_chars) > 16:
+                if len(cjk_chars) >= 6:
                     # 找到第 ⌈cjk/2⌉ 个 CJK 字符在原串中的位置
                     half_cjk = (len(cjk_chars) + 1) // 2
                     cjk_count = 0
@@ -499,35 +500,40 @@ def export_jianying_draft_v11(
                             if cjk_count == half_cjk:
                                 split_pos = idx + 1
                                 break
+            # ★ 底线: 拆分后每行至少3字，否则保持单行
             if split_pos > 0:
-                title_line1 = title_line2[:split_pos].strip()
-                title_line2 = title_line2[split_pos:].lstrip()
+                candidate = title_line2[:split_pos].strip()
+                if _cjk_count(candidate) >= 3 and _cjk_count(title_line2[split_pos:].lstrip()) >= 3:
+                    title_line1 = title_line2[:split_pos].strip()
+                    title_line2 = title_line2[split_pos:].lstrip()
 
     # title_materials: [disclaimer, slogan, title_line2, title_line1]
     # 对应 template text indices: [14, 15, 16, 17+]
+    # ★ 固定索引：前4项必须存在（空文本占位），后续代码按索引 0/1/2/3 读取
     title_materials = []
-    if lower_title_2.strip():
-        # 声明均分分行: 多空格 → \n 断行
-        disc_text = lower_title_2.strip()
-        while '  ' in disc_text:
-            disc_text = disc_text.replace('  ', '\n')
-        title_materials.append({
-            "text": disc_text,
-            "fill": CLR_DISC, "stroke": None, "stroke_width": 0,
-            "font_size": 5.0, "font": FONT_DISC,
-        })
-    if lower_title_1.strip():
-        title_materials.append({
-            "text": lower_title_1.strip(),
-            "fill": CLR_SLOGAN, "stroke": None, "stroke_width": 0,
-            "font_size": 12.0, "font": FONT_SLOGAN,
-        })
+    # [0] 声明 (可能为空)
+    disc_text = lower_title_2.strip()
+    while '  ' in disc_text:
+        disc_text = disc_text.replace('  ', '\n')
+    title_materials.append({
+        "text": disc_text,
+        "fill": CLR_DISC, "stroke": None, "stroke_width": 0,
+        "font_size": 5.0, "font": FONT_DISC,
+    })
+    # [1] 标语 (可能为空)
+    title_materials.append({
+        "text": lower_title_1.strip(),
+        "fill": CLR_SLOGAN, "stroke": None, "stroke_width": 0,
+        "font_size": 12.0, "font": FONT_SLOGAN,
+    })
+    # [2] 标题第二行 — 金色
     if title_line2.strip():
         title_materials.append({
             "text": title_line2.strip(),
             "fill": CLR_GOLD, "stroke": None, "stroke_width": 0,
             "font_size": 10.0, "font": FONT_TITLE,
         })
+    # [3] 标题第一行 — 白色 (仅标题拆分时)
     if title_line1.strip():
         title_materials.append({
             "text": title_line1.strip(),
@@ -701,7 +707,7 @@ def export_jianying_draft_v11(
         del draft["tracks"][TRACK_SUBTITLE]["segments"][si:]
 
     # ======== 9. 声明 (TRACK_DISC[2], y=-0.85, 静态全段) ========
-    if title_materials and 0 < len(title_materials):
+    if title_materials and title_materials[0]["text"]:
         mt = title_materials[0]  # disclaimer
         ti = tmpl_sub_text_count + 0
         seg = draft["tracks"][TRACK_DISC]["segments"][0]
@@ -716,7 +722,7 @@ def export_jianying_draft_v11(
         draft["tracks"][TRACK_DISC]["segments"] = []
 
     # ======== 10. 标语 (TRACK_SLOGAN[3], y=-0.72, 静态全段) ========
-    if len(title_materials) > 1:
+    if len(title_materials) > 1 and title_materials[1]["text"]:
         mt = title_materials[1]  # slogan
         ti = tmpl_sub_text_count + 1
         seg = draft["tracks"][TRACK_SLOGAN]["segments"][0]
