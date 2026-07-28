@@ -152,6 +152,7 @@ async def plan_visual_arc(
     style: str = "default",
     total_segments: int = 1,
     sentences: list = None,
+    gender: str = "auto",
 ) -> dict:
     """
     v5 核心：LLM 通读全文 → 输出全局视觉方向（单次 API，短平快）。
@@ -167,6 +168,7 @@ async def plan_visual_arc(
         "Determine the protagonist's gender STRICTLY from the text (look for 他/她/he/she/man/woman/boy/girl). "
         "Never default to any gender. The examples in this prompt are format references ONLY — "
         "always extract the ACTUAL gender from the story. "
+        + (f"OVERRIDE: protagonist gender is {gender}. Ignore text cues, use this gender for all outputs. " if gender in ("male", "female") else "") +
         "The story has {total} numbered segments. Output JSON. ALL text in ENGLISH.\n\n"
         "=== FACE POLICY (IMPORTANT — classify by public recognizability) ===\n"
         "The ONLY question: does the audience KNOW what this person looks like?\n"
@@ -200,13 +202,14 @@ async def plan_visual_arc(
         '- "face_policy": "show" or "avoid" — see FACE POLICY above.\n'
         '- "protagonist": fixed character reference for EVERY image. '
         "Describe gender, age range, key physical traits (hairstyle, typical clothing, body type). "
-        "20-30 words. Example: 'Chinese man in his 20s, short hair, simple cotton shirt, lean build'.\n"
+        "20-30 words. Example (gender from text, NOT a default): "
+        "'a person in their 20s, short hair, simple cotton shirt, lean build'.\n"
         '- "scenes": array of {total} objects, each with:\n'
         '   - "emotion": one of [glory, tragedy, transition, daily]\n'
         '   - "scene": DETAILED English visual description, 15-30 words. '
         "MUST include: specific costume, specific prop or setting detail, "
         "specific lighting source. Be VIVID — NOT 'person in room' but "
-        "'young man in a worn denim jacket, leaning against a graffiti-covered wall, "
+        "'a figure in a worn denim jacket, leaning against a graffiti-covered wall, "
         "golden hour light slicing through a narrow alley in Shenzhen'. "
         "IMPORTANT: describe the SCENE and ACTION, never describe the face.\n"
         '- "era_notes": atmosphere in Chinese, 20-40 words (for reference only)\n'
@@ -1129,6 +1132,7 @@ async def generate_all_images(
     book_author: str = "",
     aspect_ratio: str = "9:16",
     force: bool = False,
+    gender: str = "auto",
 ) -> dict:
     """
     v5 单图直生 + LLM 全局视觉规划。
@@ -1231,6 +1235,7 @@ async def generate_all_images(
         style=style,
         total_segments=total_segments,
         sentences=sentences,
+        gender=gender,
     )
     if visual_plan:
         plan_segments = len(visual_plan.get("segments", []))

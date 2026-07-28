@@ -1,17 +1,15 @@
 """
-剪映 v11 草稿导出服务（9轨 matte 遮罩版 — 图片缩放不溢出线框）
+剪映 v11 草稿导出服务（线框嵌入版 — 暖白线框预复合到图片上）
 基于 7月27日模板 克隆 + 增量追加策略
 
-轨道布局:
-  track[0] = video    — 纯色藏青底板 #071730 (最底层)
-  track[1] = video    — 图片 (1080×1214, y=-0.025, 含缩放特效)
-  track[2] = video    — 线框遮罩 matte (RGBA: 上/下藏青+暖白线, 中间透明 → 盖住图片溢出)
-  track[3] = text     — 字幕 (自然断句, 思源宋体, y=-0.32)
-  track[4] = text     — 声明/免责 (y=-0.85)
-  track[5] = text     — 标语 (行楷, y=-0.72)
-  track[6] = text     — 标题第二行-金色 (y=+0.73)
-  track[7] = text     — 标题第一行-白色 (仅标题拆分, y=+0.844)
-  track[8] = audio    — 配音
+轨道布局 (v2 — 无 BG/无 matte, 线框已画在图上):
+  track[0] = video    — 图片 (1080×1920 全画布, 藏青底+暖白线框+图, y=0)
+  track[1] = text     — 字幕 (自然断句, 思源宋体, y=-0.32)
+  track[2] = text     — 声明/免责 (y=-0.85)
+  track[3] = text     — 标语 (行楷, y=-0.72)
+  track[4] = text     — 标题第二行-金色 (y=+0.73)
+  track[5] = text     — 标题第一行-白色 (仅标题拆分, y=+0.844)
+  track[6] = audio    — 配音
 
 标题拆分 (对标 V5 _split_title_local):
   策略1: 全文找逗号/冒号/分号 → 语义断点
@@ -23,7 +21,7 @@
   2. draft_meta_info.json 必须解密→改值→重加密
   3. IN-PLACE 修改 + APPEND，不可整数组替换
   4. 字体必须位于剪映 Resources/Font/ 目录内方可被加载
-  5. 图片需设 transform.y=-0.028 以嵌入装饰线之间 (对应 V5 overlay=0:377)
+  5. 图片已预复合为 1080×1920 全画布 (含藏青底+暖白线框)，transform.y=0 居中
 """
 import json, os, uuid, subprocess, shutil, time, copy
 from typing import List, Optional
@@ -82,8 +80,7 @@ CLR_DISC      = [0.129, 0.173, 0.251]  # #212C40 免责声明低对比灰
 CLR_BLACK     = [0.0, 0.0, 0.0]        # 字幕描边
 CLR_LINE      = [0.910, 0.894, 0.831]  # #E8E4D4 装饰线暖白
 
-# ======== 轨道索引 (基于模板6轨) ========
-# 内部代码使用模板原始索引，最后生成时会插入底板轨道到 track[0]
+# ======== 轨道索引 (基于模板6轨, 不再插入BG/matte) ========
 TRACK_VIDEO = 0
 TRACK_SUBTITLE = 1        # y≈-0.32  字幕 (思源宋体)
 TRACK_DISC = 2            # y≈-0.85  免责声明
@@ -356,49 +353,47 @@ def export_jianying_draft_v11(
     res_dir = os.path.join(draft_dir, "Resources")
     os.makedirs(res_dir, exist_ok=True)
 
-    # 纯色底板: #071730 (全画布, track 最底层)
-    bg_png_path = os.path.join(res_dir, "_bg_071730.png")
-    bg_img = PILImage.new("RGB", (1080, 1920), (7, 23, 48))
-    bg_img.save(bg_png_path, "PNG")
-
-    # 线框遮罩 matte: 上下藏青底+暖白线, 中间透明让图片透出 (放在图片 track 上面)
-    # 对标 V5 bench: drawbox 在 overlay 之后 → 线/底色在图片上层
-    matte_png_path = os.path.join(res_dir, "_matte_frame.png")
-    matte_img = PILImage.new("RGBA", (1080, 1920), (0, 0, 0, 0))  # 全透明
-    matte_draw = ImageDraw.Draw(matte_img)
-    bg_rgba = (7, 23, 48, 255)      # #071730 藏青
-    line_rgba = (232, 228, 212, 255)  # #E8E4D4 暖白
-    # 上线: y=373, 4px — 在遮罩区上方
-    matte_draw.rectangle([0, 373, 1080, 377], fill=line_rgba)
-    # 下线: y=1591, 4px — 在遮罩区下方
-    matte_draw.rectangle([0, 1591, 1080, 1595], fill=line_rgba)
-    # 上遮罩: y=0..373, 藏青底色 + 盖住图片溢出
-    matte_draw.rectangle([0, 0, 1080, 373], fill=bg_rgba)
-    # 下遮罩: y=1595..1920, 藏青底色 + 盖住图片溢出
-    matte_draw.rectangle([0, 1595, 1080, 1920], fill=bg_rgba)
-    matte_img.save(matte_png_path, "PNG")
-
-    # 图片保持原样 (1080×1214, 不垫底 — 底板填充上下空间)
-    # image_paths 不变, 直接用原始路径
+    # ====== 线框嵌入方案：把暖白线框直接合成到图片上 ======
+    # 剪映视频轨不支持 RGBA alpha → matte 遮罩方案失败
+    # 改为每张图预先复合到 1080×1920 画布：藏青底 + 暖白线 + 图片居中
+    framed_image_paths = []
+    for i, img_path in enumerate(image_paths):
+        canvas = PILImage.new("RGB", (1080, 1920), (7, 23, 48))  # #071730 藏青底
+        try:
+            img = PILImage.open(img_path).convert("RGB")
+            if img.size != (1080, 1214):
+                img = img.resize((1080, 1214), PILImage.LANCZOS)
+            canvas.paste(img, (0, 377))  # 图片贴在 y=377（上线 373+4px 之下）
+        except Exception:
+            pass  # 图片加载失败则留纯底
+        draw = ImageDraw.Draw(canvas)
+        # 上线: y=373, 4px 暖白
+        draw.rectangle([0, 373, 1080, 377], fill=(232, 228, 212))
+        # 下线: y=1591, 4px 暖白
+        draw.rectangle([0, 1591, 1080, 1595], fill=(232, 228, 212))
+        framed_path = os.path.join(res_dir, f"framed_{i:03d}.png")
+        canvas.save(framed_path, "PNG")
+        framed_image_paths.append(framed_path.replace("\\", "/"))
 
     # ======== 3. 替换视频材料 (IN-PLACE: 前N个改内容, 其余追加) ========
+    # ★ 使用预复合的 framed 图片 (1080×1920, 线框已嵌入，无需 matte/BG 轨)
     tmpl_vid_count = len(draft["materials"]["videos"])
     for i in range(min(tmpl_vid_count, n_sentences)):
         draft["materials"]["videos"][i]["id"] = _uid()
         draft["materials"]["videos"][i]["material_id"] = draft["materials"]["videos"][i]["id"]
-        draft["materials"]["videos"][i]["path"] = image_paths[i]
-        draft["materials"]["videos"][i]["material_name"] = os.path.basename(image_paths[i])
+        draft["materials"]["videos"][i]["path"] = framed_image_paths[i]
+        draft["materials"]["videos"][i]["material_name"] = f"framed_{i:03d}.png"
         draft["materials"]["videos"][i]["width"] = 1080
-        draft["materials"]["videos"][i]["height"] = 1214
+        draft["materials"]["videos"][i]["height"] = 1920
 
     for i in range(tmpl_vid_count, n_sentences):
         vm = copy.deepcopy(proto["video_mat"])
         vm["id"] = _uid()
         vm["material_id"] = vm["id"]
-        vm["path"] = image_paths[i]
-        vm["material_name"] = os.path.basename(image_paths[i])
+        vm["path"] = framed_image_paths[i]
+        vm["material_name"] = f"framed_{i:03d}.png"
         vm["width"] = 1080
-        vm["height"] = 1214
+        vm["height"] = 1920
         draft["materials"]["videos"].append(vm)
 
     # 删除多余的模板视频
@@ -621,44 +616,36 @@ def export_jianying_draft_v11(
         _append_aux_for_text(draft, proto)
 
     # ======== 7. 生成视频段 (track[0]) ========
-    tmpl_vid_segs = len(draft["tracks"][TRACK_VIDEO]["segments"])
+    # 不依赖模板初始段数，全部从 proto 复制重建，保证每张图独立可替换
+    tmpl_vid_segs = len(template["tracks"][TRACK_VIDEO]["segments"])
+    draft["tracks"][TRACK_VIDEO]["segments"] = []
     time_cursor = 0.0
-    for i in range(min(tmpl_vid_segs, n_sentences)):
-        seg = draft["tracks"][TRACK_VIDEO]["segments"][i]
-        dur = seg_durations_us[i]
-        seg["id"] = _uid()
-        seg["material_id"] = draft["materials"]["videos"][i]["id"]
-        seg["source_timerange"]["duration"] = int(dur)
-        seg["target_timerange"] = _mk_target_timerange(time_cursor, dur)
-        seg["extra_material_refs"] = _build_video_refs(draft, i, 0)  # 模板视频, 无偏移
-        time_cursor += dur
-
-    # 更新 in-place 模板视频段的动画时长 (修复: 之前只更新了追加段)
-    for i in range(min(tmpl_vid_segs, n_sentences)):
-        dur = seg_durations_us[i]
-        anim = draft["materials"]["material_animations"][i]
-        for inner in anim.get("animations", []):
-            inner["duration"] = int(dur)
-
-    for i in range(tmpl_vid_segs, n_sentences):
+    for i in range(n_sentences):
         dur = seg_durations_us[i]
         seg = copy.deepcopy(proto["video_seg"])
         seg["id"] = _uid()
         seg["material_id"] = draft["materials"]["videos"][i]["id"]
         seg["source_timerange"]["duration"] = int(dur)
         seg["target_timerange"] = {"start": int(time_cursor), "duration": int(dur)}
-        seg["extra_material_refs"] = _build_video_refs(draft, i, anim_offset_for_new_video)
+        # 前 tmpl_vid_count 个用模板原始动画索引，追加的用偏移补偿
+        anim_offset = 0 if i < tmpl_vid_count else anim_offset_for_new_video
+        seg["extra_material_refs"] = _build_video_refs(draft, i, anim_offset)
         draft["tracks"][TRACK_VIDEO]["segments"].append(seg)
         time_cursor += dur
 
-    if tmpl_vid_segs > n_sentences:
-        del draft["tracks"][TRACK_VIDEO]["segments"][n_sentences:]
-
-    # 图片定位: 嵌入上下装饰线之间 (对标 V5 bench overlay=0:377)
-    # 1080×1214 图, 线间距 y=373~1591=1214px. center=984, y_jy=(960-984)/960=-0.025
-    # 给上线留 3px 呼吸空间: y_jy=(960-987)/960=-0.028
+    # 图片定位: framed 图片已复合到 1080×1920 全画布，居中即可
+    # ★ 移除 Ken Burns 缩放动画: 线框已嵌入图片, 缩放会导致线框移动/溢出
     for seg in draft["tracks"][TRACK_VIDEO]["segments"]:
-        seg["clip"]["transform"]["y"] = -0.028
+        seg["clip"]["transform"]["y"] = 0.0
+    # 清除所有视频段的动画 (线框嵌入方案不需要缩放特效)
+    vid_anim_ids = set()
+    for seg in draft["tracks"][TRACK_VIDEO]["segments"]:
+        # extra_material_refs[3] = material_animations id (在 _build_video_refs 中的第4个)
+        if len(seg.get("extra_material_refs", [])) >= 4:
+            vid_anim_ids.add(seg["extra_material_refs"][3])
+    for anim in draft["materials"]["material_animations"]:
+        if anim["id"] in vid_anim_ids:
+            anim["animations"] = []
 
     # ======== 8. 生成字幕段 (track[1], 对标 V5 bench 自然断句) ========
     tmpl_sub_segs = len(draft["tracks"][TRACK_SUBTITLE]["segments"])
@@ -800,97 +787,20 @@ def export_jianying_draft_v11(
     # ======== 13. 保持 draft["id"] 不变 (三ID一致) ========
     draft["duration"] = total_dur
 
-    # ======== 13.5. 底板: #071730 + 装饰线 (插入 track[0]) ========
+    # ====== BG 轨和 matte 轨已移除：framed 图片自带藏青底+线框 (1080×1920) ======
+    # 不再需要独立的底板轨道和遮罩轨道，线框已直接画在每张图片上
 
-    bg_vm = copy.deepcopy(proto["video_mat"])
-    bg_vm["id"] = _uid()
-    bg_vm["material_id"] = bg_vm["id"]
-    bg_vm["path"] = bg_png_path.replace("\\", "/")
-    bg_vm["material_name"] = "_bg_071730.png"
-    bg_vm["width"] = 1080
-    bg_vm["height"] = 1920
-    draft["materials"]["videos"].insert(0, bg_vm)
+    # ======== 13.7. 最终清理：去 flag + 修正字幕 Y ========
+    # flag 会导致剪映隐藏视频轨道
+    for tr in draft["tracks"]:
+        tr.pop("flag", None)
 
-    # 底板辅助材料 (无动画)
-    for cat, pkey in [
-        ("canvases", "canvas"), ("speeds", "speed"),
-        ("material_animations", "anim"), ("material_colors", "color"),
-        ("sound_channel_mappings", "sound"),
-        ("placeholder_infos", "ph"), ("vocal_separations", "vocal"),
-    ]:
-        if proto.get(pkey) is None:
-            continue
-        m = copy.deepcopy(proto[pkey])
-        m["id"] = _uid()
-        if cat == "material_animations":
-            m["animations"] = []
-        draft["materials"][cat].append(m)
-
-    # 底板视频段 (全时长)
-    bg_seg = copy.deepcopy(proto["video_seg"])
-    bg_seg["id"] = _uid()
-    bg_seg["material_id"] = bg_vm["id"]
-    bg_seg["source_timerange"]["duration"] = total_dur
-    bg_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
-    bg_seg["extra_material_refs"] = [
-        draft["materials"]["speeds"][-1]["id"],
-        draft["materials"]["placeholder_infos"][-1]["id"],
-        draft["materials"]["canvases"][-1]["id"],
-        draft["materials"]["material_animations"][-1]["id"],
-        draft["materials"]["sound_channel_mappings"][-1]["id"],
-        draft["materials"]["material_colors"][-1]["id"],
-        draft["materials"]["vocal_separations"][-1]["id"],
-    ]
-
-    bg_track = copy.deepcopy(draft["tracks"][TRACK_VIDEO])
-    bg_track["segments"] = [bg_seg]
-    draft["tracks"].insert(0, bg_track)
-
-    # --- 13.5b. 线框遮罩 matte: 放在图片 track 上面, 对标 V5 overlay→drawbox 顺序 ---
-    matte_vm = copy.deepcopy(proto["video_mat"])
-    matte_vm["id"] = _uid()
-    matte_vm["material_id"] = matte_vm["id"]
-    matte_vm["path"] = matte_png_path.replace("\\", "/")
-    matte_vm["material_name"] = "_matte_frame.png"
-    matte_vm["width"] = 1080
-    matte_vm["height"] = 1920
-    draft["materials"]["videos"].insert(1, matte_vm)  # videos[0]=BG, [1]=matte, [2:]=images
-
-    # 遮罩辅助材料
-    for cat, pkey in [
-        ("canvases", "canvas"), ("speeds", "speed"),
-        ("material_animations", "anim"), ("material_colors", "color"),
-        ("sound_channel_mappings", "sound"),
-        ("placeholder_infos", "ph"), ("vocal_separations", "vocal"),
-    ]:
-        if proto.get(pkey) is None:
-            continue
-        m = copy.deepcopy(proto[pkey])
-        m["id"] = _uid()
-        if cat == "material_animations":
-            m["animations"] = []
-        draft["materials"][cat].append(m)
-
-    # 遮罩视频段 (全时长, y=0 居中)
-    matte_seg = copy.deepcopy(proto["video_seg"])
-    matte_seg["id"] = _uid()
-    matte_seg["material_id"] = matte_vm["id"]
-    matte_seg["source_timerange"]["duration"] = total_dur
-    matte_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
-    matte_seg["extra_material_refs"] = [
-        draft["materials"]["speeds"][-1]["id"],
-        draft["materials"]["placeholder_infos"][-1]["id"],
-        draft["materials"]["canvases"][-1]["id"],
-        draft["materials"]["material_animations"][-1]["id"],
-        draft["materials"]["sound_channel_mappings"][-1]["id"],
-        draft["materials"]["material_colors"][-1]["id"],
-        draft["materials"]["vocal_separations"][-1]["id"],
-    ]
-
-    matte_track = copy.deepcopy(draft["tracks"][TRACK_VIDEO])
-    matte_track["segments"] = [matte_seg]
-    # 插入到 track[2]: BG(0) → 图片(1) → matte(2) → 字幕(3)...
-    draft["tracks"].insert(2, matte_track)
+    # 字幕轨在所有轨插入后可能 Y 坐标错位，按段数最多+type=text 定位强制修正
+    for tr in draft["tracks"]:
+        if tr.get("type") == "text" and len(tr.get("segments", [])) > 10:
+            for seg in tr["segments"]:
+                seg["clip"]["transform"]["y"] = -0.32
+            break
 
     # ======== 14. 写入文件 ========
     draft_id = "V11-" + str(int(time.time()))
@@ -947,13 +857,9 @@ def export_jianying_draft_v11(
             _encrypt_file(os.path.join(dp, "draft_content.json"))
 
     # 素材大小
-    total_mat_size = sum(os.path.getsize(p) for p in image_paths if os.path.exists(p))
+    total_mat_size = sum(os.path.getsize(p) for p in framed_image_paths if os.path.exists(p))
     if os.path.exists(audio_path):
         total_mat_size += os.path.getsize(audio_path)
-    if os.path.exists(bg_png_path):
-        total_mat_size += os.path.getsize(bg_png_path)
-    if os.path.exists(matte_png_path):
-        total_mat_size += os.path.getsize(matte_png_path)
 
     # ======== 15. 注册 ========
     with open(REGISTRY_PATH, "r", encoding="utf-8-sig") as f:

@@ -150,6 +150,7 @@ function App() {
   const [imageSummary, setImageSummary] = useState<{total: number; success: number; failed: number; generating: boolean; complete: boolean} | null>(null)  // v9: 后端权威配图进度
   const [, setImageTotalExpected] = useState(0)  // 预期总张数（仅 setter）
   const [forceRegen, setForceRegen] = useState(false)  // 强制重跑：忽略已有图片+视觉档案缓存
+  const [genderOverride, setGenderOverride] = useState("auto")  // 性别覆写：auto/male/female
   const [isVideoLoading, setIsVideoLoading] = useState(false)
   const [videoUrl, setVideoUrl] = useState('')
   const [videoMessage, setVideoMessage] = useState('')
@@ -460,7 +461,7 @@ function App() {
     fetch(`${API_BASE}/api/images/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: taskId, style: selectedImageStyle, aspect_ratio: selectedAspectRatio, force: forceRegen }),
+      body: JSON.stringify({ task_id: taskId, style: selectedImageStyle, aspect_ratio: selectedAspectRatio, force: forceRegen, gender: genderOverride }),
     }).then(async (resp) => {
       const data = await resp.json()
       setImageTotalExpected(data.total_segments || 0)
@@ -1457,6 +1458,22 @@ function App() {
                 />
                 🗑️ 强制重跑（忽略缓存）
               </label>
+              <div className="flex items-center gap-1 px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg select-none">
+                <span className="text-gray-400 mr-1">性别</span>
+                {[
+                  { v: "auto", l: "自动" },
+                  { v: "male", l: "男" },
+                  { v: "female", l: "女" },
+                ].map(({ v, l }) => (
+                  <label key={v} className={`px-2 py-0.5 rounded cursor-pointer text-xs font-medium transition-colors ${
+                    genderOverride === v ? 'bg-purple-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+                  }`}>
+                    <input type="radio" name="genderOverride" value={v} checked={genderOverride === v}
+                      onChange={(e) => setGenderOverride(e.target.value)} className="sr-only" />
+                    {l}
+                  </label>
+                ))}
+              </div>
               <button
                 onClick={refreshImages}
                 disabled={!taskId}
