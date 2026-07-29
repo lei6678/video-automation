@@ -122,15 +122,28 @@ async def synthesize(
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(VOLC_TTS_URL, json=payload, headers=headers)
 
+            resp_text = resp.text.strip()
+
+            # 火山引擎可能返回单行 JSON 错误（即使 HTTP 200）
+            try:
+                top_level = json.loads(resp_text)
+                err_code = top_level.get("code", 0)
+                if err_code and err_code != 0:
+                    err_msg = top_level.get("message", "")
+                    req_id = top_level.get("reqid", "")
+                    print(f"[volc-v3] API错误 code={err_code}, msg={err_msg}, reqid={req_id}")
+                    return None
+            except json.JSONDecodeError:
+                pass
+
             if resp.status_code != 200:
-                err_text = resp.text[:300]
-                print(f"[volc-v3] API 返回 {resp.status_code}: {err_text}")
+                print(f"[volc-v3] HTTP {resp.status_code}: {resp_text[:300]}")
                 return None
 
             audio_data = bytearray()
             latest_code = 0
 
-            for line in resp.text.strip().split("\n"):
+            for line in resp_text.split("\n"):
                 if not line:
                     continue
                 try:
@@ -325,28 +338,55 @@ async def synthesize_clone(
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(VOLC_TTS_URL, json=payload, headers=headers)
 
+            resp_text = resp.text.strip()
+
+            # 火山引擎可能返回单行 JSON 错误（即使 HTTP 200）
+            # 先检查是否为错误响应
+            try:
+                top_level = json.loads(resp_text)
+                err_code = top_level.get("code", 0)
+                if err_code and err_code != 0:
+                    err_msg = top_level.get("message", "")
+                    req_id = top_level.get("reqid", "")
+                    print(f"[volc-clone-tts] API错误 code={err_code}, msg={err_msg}, reqid={req_id}")
+                    return None
+            except json.JSONDecodeError:
+                pass  # 不是单行 JSON，继续按流式解析
+
             if resp.status_code != 200:
-                err_text = resp.text[:300]
-                print(f"[volc-clone-tts] API 返回 {resp.status_code}: {err_text}")
+                print(f"[volc-clone-tts] HTTP {resp.status_code}: {resp_text[:300]}")
                 return None
 
             audio_data = bytearray()
-            for line in resp.text.strip().split("\n"):
+            line_count = 0
+            first_chunk_printed = False
+            for line in resp_text.split("\n"):
                 if not line:
                     continue
+                line_count += 1
                 try:
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
+                    print(f"[volc-clone-tts] JSON解析失败, line={line_count}: {line[:200]}")
                     continue
+
+                if not first_chunk_printed:
+                    first_chunk_printed = True
+                    header = chunk.get("header", {})
+                    print(f"[volc-clone-tts] 首个chunk header: code={header.get('code')}, msg={header.get('message', '')}, has_data={bool(chunk.get('data'))}")
 
                 code = chunk.get("header", {}).get("code", 0)
                 if code == 0 and chunk.get("data"):
                     audio_data.extend(base64.b64decode(chunk["data"]))
                 elif code == 20000000:
+                    print(f"[volc-clone-tts] 收到EOF chunk, line={line_count}")
                     break
                 elif code > 0:
                     msg = chunk.get("header", {}).get("message", "")
-                    print(f"[volc-clone-tts] 服务端错误 code={code}: {msg}")
+                    task_id = chunk.get("header", {}).get("task_id", "")
+                    print(f"[volc-clone-tts] 服务端错误 code={code}, msg={msg}, task_id={task_id}, line={line_count}")
+
+            print(f"[volc-clone-tts] 共收到 {line_count} 行响应, 音频数据 {len(audio_data)} bytes")
 
             if not audio_data:
                 print("[volc-clone-tts] 未收到任何音频数据")

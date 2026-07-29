@@ -27,7 +27,7 @@ load_dotenv()
 
 # ============== 凭证 ==============
 FAL_KEY = os.getenv("FAL_KEY", "")
-FAL_QUALITY = os.getenv("FAL_QUALITY", "medium")  # low | medium | high，默认 medium（v5 品质提升）
+FAL_QUALITY = os.getenv("FAL_QUALITY", "low")  # low | medium | high，默认 low（成本控制）
 
 KELING_API_KEY = os.getenv("KELING_API_KEY", "")
 KELING_BASE_URL = os.getenv("KELING_BASE_URL", "https://api.kuaishou.com/keling/v1")
@@ -155,8 +155,12 @@ async def plan_visual_arc(
     gender: str = "auto",
 ) -> dict:
     """
+    [DEPRECATED v8] Use generate_screenplay() + generate_storyboard() instead.
+
     v5 核心：LLM 通读全文 → 输出全局视觉方向（单次 API，短平快）。
     sentences: 预切分好的文案列表，用于生成带编号的分段提示。
+
+    保留此函数仅作为 v8 screenplay/storyboard pipeline 的降级回退。
     """
     deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
     if not deepseek_key:
@@ -282,6 +286,289 @@ async def plan_visual_arc(
                 return {}
     except Exception as e:
         print(f"[image:plan] Failed: {type(e).__name__}: {e}")
+        return {}
+
+
+async def generate_screenplay(
+    rewritten_transcript: str,
+    book_title: str = "",
+    book_author: str = "",
+    visual_context: str = "",
+    style: str = "default",
+    total_segments: int = 1,
+    sentences: list = None,
+    gender: str = "auto",
+) -> dict:
+    """
+    v8 Step 0: 剧本生成 — LLM 通读全文 → 全角色档案 + 场景列表。
+
+    替代旧版 plan_visual_arc 的单 protagonist 模式。
+    输出 character_cast（所有角色）+ scenes（每段场景描述+在场角色）。
+    """
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not deepseek_key:
+        print("[image:screenplay] DEEPSEEK_API_KEY not set, skip")
+        return {}
+
+    system_prompt = (
+        "You are a screenwriter and casting director adapting a story for film. "
+        "Your job: read the full script, identify ALL characters, and break it into scenes.\n\n"
+        + (f"OVERRIDE: protagonist gender is {gender}. Use this for the main character. " if gender in ("male", "female") else "") +
+        "The story has {total} numbered segments. Output JSON. ALL text in ENGLISH.\n\n"
+        "=== FACE POLICY (same as before) ===\n"
+        "Classify by public recognizability:\n"
+        '- "show": protagonist is NOT a publicly-recognized figure (ordinary person, fictional character, '
+        "historical figure with no widely-known portrait). Normal portraiture OK.\n"
+        '- "avoid": protagonist IS a publicly-recognized figure (celebrity, politician, famous face). '
+        "NEVER show a clear frontal face. Use back view, silhouette, hands, environmental wide shots.\n\n"
+        "=== DIRECTOR'S MANDATE (4 principles — EVERY scene MUST follow) ===\n"
+        "1. AGE TIMELINE: If a character appears at multiple ages (young → old, or via flashback),\n"
+        "   create SEPARATE cast entries: 'young Li Dacheng (age 27)' and 'older Li Dacheng (age 42)'.\n"
+        "   Each version gets its OWN appearance/clothing/body_type. Never describe both ages in one entry.\n"
+        "   scenes[i] MUST reference the CORRECT version based on the segment's time period.\n\n"
+        "2. ERA MARKERS: Every scene MUST include era-specific visual anchors in scene_desc.\n"
+        "   Flashback to 1985 rural China → mud-brick houses,自行车 (bicycles), blue Mao suits, kerosene lamps.\n"
+        "   Present day 2024 city → glass buildings, smartphones, casual modern clothing.\n"
+        "   Without era markers, ALL images look like 'present day'. Make time VISIBLE.\n\n"
+        "3. SIGNATURE PROPS: Identify 1-2 objects that can appear across multiple scenes\n"
+        "   (a crumpled letter, an old palm-leaf fan, a worn fountain pen, a jade bracelet).\n"
+        "   When the same prop reappears, describe it with the SAME visual details.\n"
+        "   Props externalize emotion — use them intentionally.\n\n"
+        "4. LOCATION CONTINUITY: If the same place appears in multiple scenes (e.g. 'the old house'),\n"
+        "   anchor it with FIXED visual elements EVERY time: 'the red-painted wooden door',\n"
+        "   'the jujube tree in the courtyard', 'the crack running down the south wall'.\n"
+        "   The viewer must recognize it as the SAME place across shots.\n\n"
+        "=== CHARACTER CAST ===\n"
+        "List EVERY named or recurring character. For each:\n"
+        "- name: character name with age version if applicable (e.g. 'young Li Dacheng' vs 'older Li Dacheng')\n"
+        "- gender: 'male' | 'female'\n"
+        "- age: specific age or range (e.g. '27', '65-70', '8-10')\n"
+        "- appearance: key physical traits — hairstyle, facial features, skin tone, distinguishing marks (15-25 words). "
+        "NEVER write 'unknown' — INFER from role, era, and context. A 70-year-old rural man has gray hair and wrinkles. "
+        "A 42-year-old businessman has a crisp haircut and a slight belly. If the text doesn't say, USE COMMON SENSE.\n"
+        "- clothing: typical outfit, fabric, colors (10-15 words). Infer from identity: worker→rough overalls, "
+        "official→dark Zhongshan suit, businessman→tailored suit. NEVER 'unknown'.\n"
+        "- body_type: build, posture, height, any disability (5-10 words). Infer from age and lifestyle. NEVER 'unknown'.\n"
+        "- role: 'protagonist' | 'supporting' | 'minor'\n"
+        "IMPORTANT: extract characters from BOTH the provided CHARACTER PROFILES and the story text. "
+        "If the character profiles already describe someone, use those details faithfully. "
+        "If the story mentions a character NOT in the profiles, create a profile from text clues + reasonable inference.\n\n"
+        "=== SCENES ===\n"
+        "For each of the {total} segments, describe:\n"
+        "- emotion: one of [glory, tragedy, transition, daily]\n"
+        "- scene_desc: DETAILED English visual description, 15-30 words. MUST include: specific costume, "
+        "era marker (time-appropriate object/technology), lighting source. Be VIVID.\n"
+        "- characters_present: list of character names (use EXACT age-version name from cast) who appear. "
+        "Can be empty for environment-only scenes.\n"
+        "- location: where this scene takes place. If recurring location, use SAME location name + SAME anchor elements.\n"
+        "- time: time of day / season / specific year or era cue (e.g. 'summer 1985, dusk', 'present day, morning')\n\n"
+        "=== EMOTION LIGHTING DICTIONARY ===\n"
+        "1. glory (peak fame, success, joy): warm amber gold, bright marquee lights, high contrast\n"
+        "2. tragedy (death, betrayal, persecution): cold cyan grey, desaturated, overcast, deep shadows\n"
+        "3. transition (journey, uncertainty, fleeing): golden hour, sunset silhouette, rim light\n"
+        "4. daily (learning, ordinary life): soft natural light, diffuse, neutral palette\n\n"
+        "SAFETY: no deathbeds, no graves, no blood, no crying faces. "
+        "Use poetic distance: an empty chair, light through a window, a silhouette.\n"
+        "Output pure JSON, no markdown."
+    ).replace("{total}", str(total_segments))
+
+    context_block = ""
+    if visual_context.strip():
+        context_block = (
+            f"\nCHARACTER PROFILES (extracted from text — use these details faithfully):\n"
+            f"{visual_context.strip()}\n"
+        )
+
+    if sentences and len(sentences) == total_segments:
+        numbered = "\n".join(
+            f"[{i}] {s}" for i, s in enumerate(sentences)
+        )
+        story_block = (
+            f"=== SEGMENTED STORY ({total_segments} segments) ===\n"
+            f"Each [N] below corresponds to scenes[N] in your output.\n"
+            f"scenes[i] MUST visually reflect the content of segment [i].\n\n"
+            f"{numbered}\n=== END ==="
+        )
+    else:
+        story_block = (
+            f"=== STORY ===\n{rewritten_transcript.strip()}\n=== END ==="
+        )
+
+    user_prompt = (
+        f"Title: {book_title or 'N/A'}\nAuthor: {book_author or 'N/A'}\n"
+        f"Style: {style}\nSegments: {total_segments}\n"
+        f"{context_block}\n"
+        f"{story_block}\n"
+        f"Output the JSON now."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+            resp = await http.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-v4-flash",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 8192,
+                    "response_format": {"type": "json_object"},
+                },
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1].rstrip("```").strip()
+                screenplay = json.loads(content)
+                cast_count = len(screenplay.get("character_cast", []))
+                scene_count = len(screenplay.get("scenes", []))
+                print(f"[image:screenplay] OK — {cast_count} characters, {scene_count} scenes")
+                return screenplay
+            else:
+                print(f"[image:screenplay] API error {resp.status_code}: {resp.text[:200]}")
+                return {}
+    except Exception as e:
+        print(f"[image:screenplay] Failed: {type(e).__name__}: {e}")
+        return {}
+
+
+async def generate_storyboard(
+    screenplay: dict,
+    sentences: list,
+    visual_context: str = "",
+    total_segments: int = 1,
+) -> dict:
+    """
+    v8 Step 1: 分镜脚本 — 基于剧本生成逐镜拍摄方案。
+
+    输入 screenplay（角色表+场景列表），输出每镜的 visual_subject、
+    shot_type、composition、emotion、character_ref。
+    核心变化：visual_subject 不再总是主角，而是根据每段内容灵活选择。
+    """
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+    if not deepseek_key:
+        print("[image:storyboard] DEEPSEEK_API_KEY not set, skip")
+        return {}
+
+    character_cast = screenplay.get("character_cast", [])
+    scenes = screenplay.get("scenes", [])
+    face_policy = screenplay.get("face_policy", "show")
+
+    # 构建角色速查表
+    cast_summary = ""
+    for c in character_cast:
+        cast_summary += (
+            f"- {c.get('name', '?')}: {c.get('gender', '?')}, {c.get('age', '?')}, "
+            f"{c.get('appearance', '?')}. Clothing: {c.get('clothing', '?')}. "
+            f"Body: {c.get('body_type', '?')}. Role: {c.get('role', '?')}\n"
+        )
+
+    _face_rules = {
+        "show": "",
+        "avoid": "FACE RULE: NEVER show a clear frontal face of the protagonist. "
+                 "Use back view, side profile with face turned away, silhouette, "
+                 "hands/body close-ups (face out of frame), environmental wide shots "
+                 "where figure is small and distant, or over-the-shoulder (only back of head visible). ",
+    }
+    face_rule = _face_rules.get(face_policy, "")
+
+    system_prompt = (
+        "You are a director of photography creating a shot-by-shot storyboard. "
+        "Given a screenplay with character profiles and scene descriptions, "
+        "decide the VISUAL APPROACH for each segment.\n\n"
+        "=== YOUR TASK ===\n"
+        "For each of the {total} segments, specify WHO or WHAT is on screen, "
+        "the camera distance, and the exact visual composition.\n\n"
+        "=== SHOT TYPE GUIDE ===\n"
+        '- "wide": environmental establishing shot, figure is small in frame, emphasis on place/atmosphere\n'
+        '- "medium": waist-up or full-body, balanced figure-environment relationship, most common for dialogue\n'
+        '- "close-up": face or upper body dominates, emotional intensity, facial expression (unless face_policy=avoid)\n'
+        '- "detail": extreme close-up on hands, objects, textures, food, props — NO face at all\n\n'
+        "=== VISUAL SUBJECT RULES ===\n"
+        "- The visual_subject should VARY across segments. NOT every shot features the protagonist.\n"
+        "- Supporting characters get their OWN shots when the segment is about them.\n"
+        "- Use 'environment' when the segment describes a place or atmosphere, not a person.\n"
+        "- Use 'object detail' for close-ups of significant props (letters, food, tools, etc.).\n"
+        "- Use 'group' when multiple characters share the frame equally.\n"
+        "- A character can appear via: full figure, back view, hands only, silhouette, reflection.\n"
+        f"{face_rule}\n"
+        "=== EMOTION LIGHTING ===\n"
+        "1. glory: warm amber gold, bright marquee lights, high contrast\n"
+        "2. tragedy: cold cyan grey, desaturated, overcast, deep shadows\n"
+        "3. transition: golden hour, sunset silhouette, rim light\n"
+        "4. daily: soft natural light, diffuse, neutral palette\n\n"
+        "=== OUTPUT FORMAT ===\n"
+        '{{"shots": [{{"visual_subject": "...", "shot_type": "wide|medium|close-up|detail", '
+        '"composition": "DETAILED English visual description 15-30 words with costume/prop/lighting", '
+        '"emotion": "glory|tragedy|transition|daily", '
+        '"character_ref": "name from cast or empty string"}}]}}\n\n'
+        "IMPORTANT: composition MUST include specific visual details — clothing colors, "
+        "lighting source, camera angle hint, prop or setting detail. "
+        "Make every shot visually DISTINCT from the others.\n"
+        "Output pure JSON, no markdown."
+    ).replace("{total}", str(total_segments))
+
+    # 构建场景摘要
+    scene_summary = ""
+    for i, sc in enumerate(scenes):
+        if isinstance(sc, dict):
+            scene_summary += (
+                f"[{i}] emotion={sc.get('emotion', 'daily')}, "
+                f"chars={sc.get('characters_present', [])}, "
+                f"loc={sc.get('location', '?')}, time={sc.get('time', '?')}\n"
+                f"    desc: {sc.get('scene_desc', '')}\n"
+            )
+        else:
+            scene_summary += f"[{i}] {sc}\n"
+
+    user_prompt = (
+        f"=== CHARACTER CAST ===\n{cast_summary}\n"
+        f"=== SCENE BREAKDOWN ===\n{scene_summary}\n"
+        f"=== SEGMENT TEXT (for precise shot matching) ===\n"
+        + "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
+        + f"\n\nOutput {total_segments} shots as JSON array. Vary visual_subject and shot_type across segments."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+            resp = await http.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-v4-flash",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 8192,
+                    "response_format": {"type": "json_object"},
+                },
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"].strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1].rstrip("```").strip()
+                storyboard = json.loads(content)
+                shot_count = len(storyboard.get("shots", []))
+                print(f"[image:storyboard] OK — {shot_count} shots")
+                return storyboard
+            else:
+                print(f"[image:storyboard] API error {resp.status_code}: {resp.text[:200]}")
+                return {}
+    except Exception as e:
+        print(f"[image:storyboard] Failed: {type(e).__name__}: {e}")
         return {}
 
 
@@ -664,28 +951,87 @@ def build_single_segment_prompt(
     aspect_ratio: str = "9:16",
     visual_context: str = "",
     visual_plan: Optional[dict] = None,
+    storyboard: Optional[dict] = None,
 ) -> str:
     """
-    v5 构建单句配图 Prompt（描述体，无元指令）。
+    v8 构建单句配图 Prompt（描述体，无元指令）。
 
-    优先使用 visual_plan（LLM 全局规划结果），
-    降级时沿用旧版 style_bible 模板。
+    优先级：storyboard (v8 分镜) > visual_plan (v7 旧版) > 降级模板。
 
     最终 prompt 格式：
     [中文场景描述]。[英文视觉词汇]。全局风格 + 质量词。
     """
-    # === v7 优先：主角 + 情绪光影 + 具象场景 + 全局风格锁 ===
-    if visual_plan:
+    _face_rules = {
+        "show": "",
+        "avoid": "FACE RULE: never show a clear frontal face — "
+                 "use back view, side profile, silhouette, or environmental wide shot. ",
+    }
+
+    # === v8 优先：storyboard 分镜脚本（per-shot visual_subject + shot_type + character profile）===
+    if storyboard:
+        shots = storyboard.get("shots", [])
+        character_cast = storyboard.get("character_cast", [])
+        face_policy = storyboard.get("face_policy", "show")
+        face_rule = _face_rules.get(face_policy, "")
+
+        if shots and segment_index < len(shots):
+            shot = shots[segment_index]
+            if isinstance(shot, dict):
+                visual_subject = shot.get("visual_subject", "a figure")
+                shot_type = shot.get("shot_type", "medium")
+                composition = _sanitize_prompt(shot.get("composition", shot.get("scene_desc", "")))
+                emotion = shot.get("emotion", "daily")
+                character_ref = shot.get("character_ref", "")
+            else:
+                visual_subject = "a figure"
+                shot_type = "medium"
+                composition = _sanitize_prompt(str(shot))
+                emotion = "daily"
+                character_ref = ""
+
+            # 查找角色档案
+            char_profile = ""
+            if character_ref and character_cast:
+                for c in character_cast:
+                    if c.get("name", "") == character_ref:
+                        char_profile = (
+                            f"Character: {c.get('name', '')}, {c.get('gender', '')}, "
+                            f"age {c.get('age', '')}, {c.get('appearance', '')}. "
+                            f"Clothing: {c.get('clothing', '')}. "
+                            f"Body: {c.get('body_type', '')}. "
+                        )
+                        break
+
+            if composition:
+                emotion_light = get_emotion_lighting(emotion)
+                shot_hint = {
+                    "wide": "wide establishing shot, small figure in a large space",
+                    "medium": "medium shot, waist-up or full body",
+                    "close-up": "close-up shot, face or upper body dominates",
+                    "detail": "extreme close-up detail shot, no face, texture focus",
+                }.get(shot_type, "medium shot")
+
+                prompt = (
+                    f"A cinematic photograph, 8:9 vertical, {shot_hint}. "
+                    f"Subject: {visual_subject}. "
+                    f"Scene: {composition}. "
+                    f"Lighting: {emotion_light}. "
+                    f"{char_profile}"
+                    f"{face_rule}"
+                    f"{STYLE_LOCK}. "
+                    f"single image, no text, no watermark"
+                )
+                print(
+                    f"[image:prompt] seg {segment_index} v8分镜, "
+                    f"subject={visual_subject}, shot={shot_type}, emotion={emotion}, len={len(prompt)}"
+                )
+                return prompt
+
+    # === v7 兼容：旧版 visual_plan（无 storyboard 时降级）===
+    if visual_plan and not storyboard:
         protagonist = visual_plan.get("protagonist", "")
         face_policy = visual_plan.get("face_policy", "show")
         scenes = visual_plan.get("scenes", [])
-
-        # 面孔策略：show=自由 / avoid=六法回避
-        _face_rules = {
-            "show": "",
-            "avoid": "FACE RULE: never show a clear frontal face — "
-                     "use back view, side profile, silhouette, or environmental wide shot. ",
-        }
         face_rule = _face_rules.get(face_policy, "")
 
         if scenes and segment_index < len(scenes):
@@ -714,7 +1060,7 @@ def build_single_segment_prompt(
                 )
                 return prompt
 
-    # === 降级：旧版模板（无 visual_plan 时使用）===
+    # === 降级：旧版模板（无 visual_plan / storyboard 时使用）===
     if not style_bible:
         style_bible = STYLE_BIBLES.get("default", "")
 
@@ -1093,7 +1439,7 @@ def _is_valid_visual_profile(text: str) -> bool:
         return False
 
     # 3. 必须有档案特征关键词
-    has_profile_header = "主人公视觉档案" in t or "视觉档案" in t
+    has_profile_header = ("角色档案" in t or "主人公视觉档案" in t or "视觉档案" in t)
     has_gender = "性别" in t or "男" in first_line or "女" in first_line
     has_body = "身体特征" in t
     if not (has_profile_header or (has_gender and has_body)):
@@ -1135,17 +1481,20 @@ async def generate_all_images(
     gender: str = "auto",
 ) -> dict:
     """
-    v5 单图直生 + LLM 全局视觉规划。
+    v8 分镜架构：剧本 → 分镜 → 逐镜生图 + 多通道降级。
 
     流程:
-    0. extract_visual_context → 提取角色档案
-    0.5 plan_visual_arc → LLM 通读全文 → 逐段画面 Prompt（v5 新增）
+    0. extract_visual_context → 提取全体角色档案（v8: 含配角）
+    0.5a generate_screenplay → LLM 剧本生成 → 角色表 + 场景列表
+    0.5b generate_storyboard → LLM 分镜脚本 → per-shot visual_subject + shot_type
     1. 读取 rewritten.txt → split_into_short_sentences() 切句
-    2. for each sentence → build_single_segment_prompt(visual_plan)
+    2. for each sentence → build_single_segment_prompt(storyboard)
     3. Fal.ai gpt-image-2 单图直生（quality="medium", 4x 超采样）
     4. PIL resize 到精确目标分辨率 → 写入 TaskImage 表
     5. 异常兜底：单张失败不阻塞后续 → 降敏 → LLM 改写 → 通用 prompt → 占位图
 
+    v8 vs v7: visual_subject 不再总是主角，配角/环境/物品都有独立镜头。
+    降级链: storyboard → visual_plan (v7) → template (v5).
     Returns:
         {"total_segments": N, "total_images": N, "success": N, "failed": N}
     """
@@ -1225,9 +1574,9 @@ async def generate_all_images(
     else:
         print(f"[image:v4] 使用已缓存的视觉档案 ({len(visual_context)} 字)")
 
-    # ── Pass 0.5: v5 全局视觉规划（LLM 通读全文 → 逐段 Prompt）──
-    print(f"[image:v5] 启动全局视觉规划 (全文 {len(rewritten)} 字, {total_segments} 段)...")
-    visual_plan = await plan_visual_arc(
+    # ── Pass 0.5a: v8 剧本生成（LLM 通读全文 → 全角色档案 + 场景列表）──
+    print(f"[image:v8] 启动剧本生成 (全文 {len(rewritten)} 字, {total_segments} 段)...")
+    screenplay = await generate_screenplay(
         rewritten_transcript=rewritten,
         book_title=book_title,
         book_author=book_author,
@@ -1237,11 +1586,50 @@ async def generate_all_images(
         sentences=sentences,
         gender=gender,
     )
-    if visual_plan:
-        plan_segments = len(visual_plan.get("segments", []))
-        print(f"[image:v5] 视觉规划成功: {plan_segments} 个分镜方案")
+
+    # ── Pass 0.5b: v8 分镜脚本（剧本 → 逐镜 visual_subject + shot_type）──
+    storyboard = None
+    if screenplay:
+        cast_count = len(screenplay.get("character_cast", []))
+        scene_count = len(screenplay.get("scenes", []))
+        print(f"[image:v8] 剧本生成成功: {cast_count} 角色, {scene_count} 场景 → 启动分镜脚本...")
+        storyboard = await generate_storyboard(
+            screenplay=screenplay,
+            sentences=sentences,
+            visual_context=visual_context,
+            total_segments=total_segments,
+        )
+        if storyboard:
+            # 把 face_policy 和 character_cast 注入 storyboard（供 build_single_segment_prompt 使用）
+            storyboard["face_policy"] = screenplay.get("face_policy", "show")
+            storyboard["character_cast"] = screenplay.get("character_cast", [])
+            shot_count = len(storyboard.get("shots", []))
+            print(f"[image:v8] 分镜脚本成功: {shot_count} 镜")
+        else:
+            print("[image:v8] 分镜脚本失败，降级为旧版 visual_plan 模式")
+            # 降级：回退到旧版 plan_visual_arc
+            storyboard = None
     else:
-        print("[image:v5] 视觉规划失败，降级为逐段模板模式")
+        print("[image:v8] 剧本生成失败，降级为逐段模板模式")
+
+    # ── v7 兼容降级：screenplay 失败时回退到旧版 plan_visual_arc ──
+    visual_plan = None
+    if not screenplay and not storyboard:
+        print(f"[image:v5] v8 剧本失败 → 降级为旧版 plan_visual_arc...")
+        visual_plan = await plan_visual_arc(
+            rewritten_transcript=rewritten,
+            book_title=book_title,
+            book_author=book_author,
+            visual_context=visual_context,
+            style=style,
+            total_segments=total_segments,
+            sentences=sentences,
+            gender=gender,
+        )
+        if visual_plan:
+            print(f"[image:v5] 视觉规划成功: {len(visual_plan.get('scenes', []))} 个分镜方案")
+        else:
+            print("[image:v5] 视觉规划失败，降级为逐段模板模式")
 
     # 3. 根据画幅比确定请求尺寸与目标尺寸
     if aspect_ratio == "16:9":
@@ -1301,7 +1689,7 @@ async def generate_all_images(
                 actual_style_bible = style_bible
                 actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
-            # 构建 Prompt（v7：已内置情绪光影+风格锁+安全后缀，不需额外追加）
+            # 构建 Prompt（v8：优先 storyboard, v7 兼容 visual_plan）
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -1312,9 +1700,10 @@ async def generate_all_images(
                 aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
                 visual_plan=visual_plan,
+                storyboard=storyboard,
             )
-            if visual_plan:
-                final_prompt = base_prompt  # v7: 已包含所有风格元素
+            if storyboard or visual_plan:
+                final_prompt = base_prompt  # v8/v7: 已包含所有风格元素
             else:
                 final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
@@ -1364,6 +1753,7 @@ async def generate_all_images(
                                 aspect_ratio=aspect_ratio,
                                 visual_context=visual_context,
                                 visual_plan=visual_plan,
+                                storyboard=storyboard,
                             )
                             llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
                             print(f"[image:v4] 段 {seg_idx + 1} LLM 改写完成 → 重试 Fal.ai")
@@ -1623,11 +2013,9 @@ async def regenerate_single_image(
         style_bible=actual_style_bible,
         aspect_ratio=aspect_ratio,
         visual_context=visual_context,
+        # regenerate: no screenplay/storyboard — fall through to template mode
     )
-    if visual_plan:
-        prompt = base_prompt
-    else:
-        prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
+    prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
 
     print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
 
