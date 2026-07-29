@@ -111,20 +111,20 @@ function App() {
   // Step 3: 书籍信息
   const [bookTitle, setBookTitle] = useState('')
   const [bookAuthor, setBookAuthor] = useState('')
-  const [contentMode, setContentMode] = useState<'book' | 'general'>('book')  // 图书 / 百货赛道
+  const [contentMode, setContentMode] = useState<'book' | 'general'>('general')  // 图书 / 百货赛道
   const [videoTitle, setVideoTitle] = useState('')  // AI 生成的爆款标题
   const [cardSlogan, setCardSlogan] = useState('- 品读传奇人生 -')
   const [cardSubtitleLine, setCardSubtitleLine] = useState('图片由AI生成与网络下载\n科普视频 无不良引导')
 
   // Step01 双模输入
-  const [inputMode, setInputMode] = useState<'standard' | 'import'>('standard')  // 标准模式 | 直接导入
+  const [inputMode, setInputMode] = useState<'standard' | 'import'>('import')  // 标准模式 | 直接导入
   const [manualText, setManualText] = useState('')
   const [manualTitle, setManualTitle] = useState('')
   // 导入模式专用状态
   const [importRewrittenText, setImportRewrittenText] = useState('')
   const [importVideoTitle, setImportVideoTitle] = useState('')
-  const [importContentMode, setImportContentMode] = useState<'book' | 'general'>('book')
-  const [selectedVoice, setSelectedVoice] = useState("vc_shuangsisi")
+  const [importContentMode, setImportContentMode] = useState<'book' | 'general'>('general')
+  const [selectedVoice, setSelectedVoice] = useState("vc_clone_wanglq")
   const [selectedRate, setSelectedRate] = useState("+10%")
   const [segments, setSegments] = useState<SegmentInfo[]>([])
   const [finalAudioUrl, setFinalAudioUrl] = useState('')
@@ -142,7 +142,7 @@ function App() {
   const [images, setImages] = useState<any[]>([])
   const [imageMessage, setImageMessage] = useState('')
   const [selectedImageStyle, setSelectedImageStyle] = useState('default')
-  const [selectedAspectRatio, setSelectedAspectRatio] = useState('16:9')  // v4: 16:9 横图 | 9:16 竖图
+  const [selectedAspectRatio, setSelectedAspectRatio] = useState('8:9')  // v4: 16:9 横图 | 9:16 竖图 | 8:9 对标卡片
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)  // 轮询定时器
 
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null)  // 当前大图预览的段号
@@ -161,7 +161,7 @@ function App() {
   const [assDownloadUrl, setAssDownloadUrl] = useState('')
   const [jianyingPublished, setJianyingPublished] = useState(false)
   const [jianyingDraftName, setJianyingDraftName] = useState('')
-  const [selectedVideoStyle, setSelectedVideoStyle] = useState('card_16x9')
+  const [selectedVideoStyle, setSelectedVideoStyle] = useState('card_bench')
   const [videoUrlCard, setVideoUrlCard] = useState('')
   const [archivePath, setArchivePath] = useState('')  // v9: 成品库归档路径
 
@@ -605,6 +605,7 @@ function App() {
           video_title: videoTitle,
           slogan: cardSlogan,
           subtitle_line: cardSubtitleLine,
+          skip_ffmpeg: true,  // v11: 跳过本地合成，直接出剪映草稿（GPU导出更快）
         }),
       })
       const data = await resp.json()
