@@ -12,5 +12,5 @@ echo.
 echo Starting server...
 echo.
 
-python main.py
+python -u main.py
 pause
