@@ -391,6 +391,8 @@ class ComposeVideoRequest(BaseModel):
     # v8 对标卡片模式：双色标题两行（留空则由 LLM 自动拆分 video_title/书名）
     title_line1: str = ""
     title_line2: str = ""
+    # v11：跳过本地 FFmpeg 合成，仅生成剪映草稿（GPU 导出更快 + 省 CPU/磁盘）
+    skip_ffmpeg: bool = False
 
 
 class ComposeVideoResponse(BaseModel):
@@ -1861,7 +1863,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
     result_bench = {}
 
     # === 1) cinematic（主力：AI 配图 + Ken Burns） ===
-    if "cinematic" in request.modes:
+    if not request.skip_ffmpeg and "cinematic" in request.modes:
         result_cinematic = await compose_final_video(
             task_id=task_id,
             db=db,
@@ -1875,7 +1877,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         )
 
     # === 2) typewriter（黑底大字版） ===
-    if "typewriter" in request.modes:
+    if not request.skip_ffmpeg and "typewriter" in request.modes:
         tw_style = VIDEO_STYLES.get("typewriter", {"font_size": 64})
         result_tw = await compose_final_video_typewriter(
             task_id=task_id,
@@ -1890,7 +1892,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         )
 
     # === 3) card（v7 三段式：暗夜海军蓝遮罩 + 标语模板化） ===
-    if "card" in request.modes:
+    if not request.skip_ffmpeg and "card" in request.modes:
         ar = request.aspect_ratio or "16:9"
         card_style = VIDEO_STYLES.get("card_3x4" if ar == "3:4" else "card_16x9", {"font_size": 52})
         is_general = request.content_mode == "general"
@@ -1912,7 +1914,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         )
 
     # === 4) bench（v8 对标卡片：深藏青底 + 8:9 满宽大图 + 双色标题） ===
-    if "bench" in request.modes:
+    if not request.skip_ffmpeg and "bench" in request.modes:
         t1 = request.title_line1.strip()
         t2 = request.title_line2.strip()
         if not (t1 or t2):
@@ -1953,11 +1955,14 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
     primary = result_bench if result_bench else (
         result_card if result_card else (result_cinematic if result_cinematic else result_tw)
     )
+    # skip_ffmpeg 模式：无 primary（仅出剪映草稿）
+    skip_ffmpeg = request.skip_ffmpeg
 
-    # === 剪映 v11 草稿导出（matte 遮罩三轨分层架构）===
+    # === 剪映 v11 草稿导出 ===
     jianying_published = False
     jianying_draft_name = None
-    if primary and "error" not in primary:
+    # skip_ffmpeg 模式始终生成；普通模式需 primary 成功
+    if skip_ffmpeg or (primary and "error" not in primary):
         try:
             from services.jianying_v11_service import export_jianying_draft_v11
             from services.video_service import _find_bgm, BGM_VOLUME, BGM_FADE_SEC, get_audio_duration
@@ -2045,7 +2050,7 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         except Exception as e:
             print(f"[compose] 成片归档失败（不影响成片）: {e}")
 
-    if "error" in primary:
+    if not skip_ffmpeg and "error" in primary:
         return ComposeVideoResponse(
             task_id=task_id,
             video_url="",
@@ -2058,42 +2063,48 @@ async def compose_video(request: ComposeVideoRequest, db: Session = Depends(get_
         )
 
     msg_parts = []
-    if result_cinematic:
-        msg_parts.append(f"电影感 {result_cinematic.get('duration_sec', 0)}s")
-    if result_tw:
-        msg_parts.append(f"大字版 {result_tw.get('duration_sec', 0)}s")
-    if result_card:
-        msg_parts.append(f"卡片 {result_card.get('duration_sec', 0)}s")
-    if result_bench:
-        msg_parts.append(f"对标卡片 {result_bench.get('duration_sec', 0)}s")
+    if not skip_ffmpeg:
+        if result_cinematic:
+            msg_parts.append(f"电影感 {result_cinematic.get('duration_sec', 0)}s")
+        if result_tw:
+            msg_parts.append(f"大字版 {result_tw.get('duration_sec', 0)}s")
+        if result_card:
+            msg_parts.append(f"卡片 {result_card.get('duration_sec', 0)}s")
+        if result_bench:
+            msg_parts.append(f"对标卡片 {result_bench.get('duration_sec', 0)}s")
+    if jianying_published:
+        msg_parts.append(f"剪映v11草稿({jianying_draft_name})")
+
+    # skip_ffmpeg 模式：无 MP4 产出，视频元数据从共享数据计算
+    video_url = primary.get("video_url", "") if not skip_ffmpeg else ""
+    duration_sec = primary.get("duration_sec", 0) if not skip_ffmpeg else (total_dur or 0)
+    size_mb = primary.get("size_mb", 0) if not skip_ffmpeg else 0
+    segment_count = primary.get("segment_count", 0) if not skip_ffmpeg else len(sentences)
 
     return ComposeVideoResponse(
         task_id=task_id,
-        video_url=primary.get("video_url", ""),
-        duration_sec=primary.get("duration_sec", 0),
-        size_mb=primary.get("size_mb", 0),
-        segment_count=primary.get("segment_count", 0),
-        width=primary.get("width", 1080),
-        height=primary.get("height", 1920),
-        message="成片完成！" + " + ".join(msg_parts),
-        srt_url=primary.get("srt_url"),
-        ass_url=primary.get("ass_url"),
-        jianying_draft_url=primary.get("jianying_draft_url") or (
-            f"/video/{task_id}/draft_content.json"
-            if _os.path.exists(_os.path.join(task_dir, "draft_content.json")) else None
-        ),
+        video_url=video_url,
+        duration_sec=duration_sec,
+        size_mb=size_mb,
+        segment_count=segment_count,
+        width=1080,
+        height=1920,
+        message="成片完成！" + (" + ".join(msg_parts) if msg_parts else ""),
+        srt_url=primary.get("srt_url") if not skip_ffmpeg else None,
+        ass_url=primary.get("ass_url") if not skip_ffmpeg else None,
+        jianying_draft_url=None,
         jianying_published=jianying_published,
         jianying_draft_name=jianying_draft_name,
-        black_placeholder_count=primary.get("black_placeholder_count", 0),
-        video_url_typewriter=result_tw.get("video_url") if "error" not in result_tw else None,
-        duration_sec_typewriter=result_tw.get("duration_sec") if "error" not in result_tw else None,
-        size_mb_typewriter=result_tw.get("size_mb") if "error" not in result_tw else None,
-        video_url_card=result_card.get("video_url") if "error" not in result_card else None,
-        duration_sec_card=result_card.get("duration_sec") if "error" not in result_card else None,
-        size_mb_card=result_card.get("size_mb") if "error" not in result_card else None,
-        video_url_bench=result_bench.get("video_url") if "error" not in result_bench else None,
-        duration_sec_bench=result_bench.get("duration_sec") if "error" not in result_bench else None,
-        size_mb_bench=result_bench.get("size_mb") if "error" not in result_bench else None,
+        black_placeholder_count=primary.get("black_placeholder_count", 0) if not skip_ffmpeg else 0,
+        video_url_typewriter=result_tw.get("video_url") if not skip_ffmpeg and "error" not in result_tw else None,
+        duration_sec_typewriter=result_tw.get("duration_sec") if not skip_ffmpeg and "error" not in result_tw else None,
+        size_mb_typewriter=result_tw.get("size_mb") if not skip_ffmpeg and "error" not in result_tw else None,
+        video_url_card=result_card.get("video_url") if not skip_ffmpeg and "error" not in result_card else None,
+        duration_sec_card=result_card.get("duration_sec") if not skip_ffmpeg and "error" not in result_card else None,
+        size_mb_card=result_card.get("size_mb") if not skip_ffmpeg and "error" not in result_card else None,
+        video_url_bench=result_bench.get("video_url") if not skip_ffmpeg and "error" not in result_bench else None,
+        duration_sec_bench=result_bench.get("duration_sec") if not skip_ffmpeg and "error" not in result_bench else None,
+        size_mb_bench=result_bench.get("size_mb") if not skip_ffmpeg and "error" not in result_bench else None,
         archive_path=archive_path,
     )
 
