@@ -1,15 +1,20 @@
 """
-剪映 v11 草稿导出服务（线框嵌入版 — 暖白线框预复合到图片上）
+剪映 v11 草稿导出服务（遮盖条架构 — Ken Burns 缩放 + 静态线框）
 基于 7月27日模板 克隆 + 增量追加策略
 
-轨道布局 (v2 — 无 BG/无 matte, 线框已画在图上):
-  track[0] = video    — 图片 (1080×1920 全画布, 藏青底+暖白线框+图, y=0)
-  track[1] = text     — 字幕 (自然断句, 思源宋体, y=-0.32)
-  track[2] = text     — 声明/免责 (y=-0.85)
-  track[3] = text     — 标语 (行楷, y=-0.72)
-  track[4] = text     — 标题第二行-金色 (y=+0.73)
-  track[5] = text     — 标题第一行-白色 (仅标题拆分, y=+0.844)
-  track[6] = audio    — 配音
+轨道布局 (v3 — 上下遮盖条保护线框, 图片独立缩放):
+  track[0] = video    — 纯藏青底板 #071730 (1080×1920, 静态全段)
+  track[1] = video    — 图片 (1080×1214, y=377, Ken Burns 1.0→1.12 缩放)
+  track[2] = video    — 上遮盖条 (1080×377, y=0, 藏青+暖白上线, 静态全段)
+  track[3] = video    — 下遮盖条 (1080×329, y=1591, 暖白下线+藏青, 静态全段)
+  track[4] = text     — 字幕 (自然断句, 思源宋体, y=-0.32)
+  track[5] = text     — 声明/免责 (y=-0.85)
+  track[6] = text     — 标语 (行楷, y=-0.72)
+  track[7] = text     — 标题第二行-金色 (y=+0.73)
+  track[8] = text     — 标题第一行-白色 (仅标题拆分, y=+0.844)
+  track[9] = audio    — 配音
+
+遮盖条原理: 图片缩放溢出 → 上/下藏青遮盖条(纯RGB, 无alpha)挡在图片上层 → 线框始终静态
 
 标题拆分 (对标 V5 _split_title_local):
   策略1: 全文找逗号/冒号/分号 → 语义断点
@@ -21,7 +26,8 @@
   2. draft_meta_info.json 必须解密→改值→重加密
   3. IN-PLACE 修改 + APPEND，不可整数组替换
   4. 字体必须位于剪映 Resources/Font/ 目录内方可被加载
-  5. 图片已预复合为 1080×1920 全画布 (含藏青底+暖白线框)，transform.y=0 居中
+  5. 上下遮盖条用纯RGB (无alpha通道), 遮盖图片缩放溢出
+  6. Ken Burns 动效来自 backend/effects/kenburns_v11/ (自定义 1.0→1.12 渐进缩放)
 """
 import json, os, uuid, subprocess, shutil, time, copy
 from typing import List, Optional
@@ -50,6 +56,8 @@ SYSTEM_FONT_PATH = JY_INSTALL_DIR + "/Resources/Font/SystemFont/zh-hans.ttf"
 DRAFT_ROOT = r"E:/360Downloads/JianyingPro Drafts"
 TEMPLATE_DIR = r"E:/360Downloads/JianyingPro Drafts/Template_v11_6T"
 REGISTRY_PATH = r"C:\Users\Admin\AppData\Local\JianyingPro\User Data\Projects\com.lveditor.draft\root_meta_info.json"
+
+EFFECTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "effects", "kenburns_v11")
 
 # ======== 字体 (对标 V5 bench: subtitle也用思源宋体, slogan用行楷) ========
 JY_FONT_DIR = JY_INSTALL_DIR + "/Resources/Font"
@@ -80,18 +88,22 @@ CLR_DISC      = [0.129, 0.173, 0.251]  # #212C40 免责声明低对比灰
 CLR_BLACK     = [0.0, 0.0, 0.0]        # 字幕描边
 CLR_LINE      = [0.910, 0.894, 0.831]  # #E8E4D4 装饰线暖白
 
-# ======== 轨道索引 (基于模板6轨, 不再插入BG/matte) ========
-TRACK_VIDEO = 0
-TRACK_SUBTITLE = 1        # y≈-0.32  字幕 (思源宋体)
-TRACK_DISC = 2            # y≈-0.85  免责声明
-TRACK_SLOGAN = 3          # y≈-0.72  标语 (行楷)
-TRACK_TITLE = 4           # y≈+0.73  标题 (两行共用, 另加title_line1 track)
-TRACK_AUDIO = 5
+# ======== 轨道索引 (v3: 4视频轨 + 4文字轨 + 1音频 = 9轨, 标题拆分为10轨) ========
+TRACK_BG = 0              # 纯藏青底板 (静态全段)
+TRACK_VIDEO = 1           # 图片 + Ken Burns
+TRACK_COVER_TOP = 2       # 上遮盖条 (藏青+上线)
+TRACK_COVER_BOT = 3       # 下遮盖条 (下线+藏青)
+TRACK_SUBTITLE = 4        # y≈-0.32  字幕 (思源宋体)
+TRACK_DISC = 5            # y≈-0.85  免责声明
+TRACK_SLOGAN = 6          # y≈-0.72  标语 (行楷)
+TRACK_TITLE = 7           # y≈+0.73  标题第二行-金色
+# TRACK_TITLE_LINE1 = 8   # 标题第一行-白色 (动态插入)
+TRACK_AUDIO = 8           # 起始=8, 标题拆分时插在前面变成9
 
 # ======== ref 顺序 (严格匹配) ========
 VIDEO_REF_TYPES = [
     "speeds", "placeholder_infos", "canvases", "material_animations",
-    "sound_channel_mappings", "material_colors", "vocal_separations"
+    "sound_channel_mappings", "material_colors", "loudnesses", "vocal_separations"
 ]
 AUDIO_REF_TYPES = [
     "speeds", "placeholder_infos", "beats",
@@ -99,10 +111,10 @@ AUDIO_REF_TYPES = [
 ]
 TEXT_REF_TYPES = ["material_animations"]
 
-# 每个视频段需要追加的全套辅助材料 (不含 beats, beats 是音频专属)
+# 每个视频段需要追加的全套辅助材料 (含 loudnesses 修复 historical bug)
 VIDEO_AUX_TYPES = [
     "canvases", "speeds", "material_animations", "material_colors",
-    "sound_channel_mappings", "placeholder_infos", "vocal_separations"
+    "sound_channel_mappings", "placeholder_infos", "loudnesses", "vocal_separations"
 ]
 # 每个文字段需要追加的辅助材料
 TEXT_AUX_TYPES = ["material_animations"]
@@ -164,15 +176,15 @@ def _load_template() -> dict:
 
 
 def _deep_clone_prototypes(template: dict) -> dict:
-    """从 6 轨模板提取所有原型对象"""
+    """从 6 轨模板提取所有原型对象 (模板视频轨永远在 index 0)"""
     tracks = template["tracks"]
     mats = template["materials"]
     return {
-        "video_seg": copy.deepcopy(tracks[TRACK_VIDEO]["segments"][0]),
+        "video_seg": copy.deepcopy(tracks[0]["segments"][0]),  # 模板 track[0] = video
         "video_mat": copy.deepcopy(mats["videos"][0]),
-        "subtitle_seg": copy.deepcopy(tracks[TRACK_SUBTITLE]["segments"][0]),
-        "title_seg": copy.deepcopy(tracks[TRACK_TITLE]["segments"][0]),
-        "audio_seg": copy.deepcopy(tracks[TRACK_AUDIO]["segments"][0]),
+        "subtitle_seg": copy.deepcopy(tracks[1]["segments"][0]),    # 模板 track[1]=subtitle
+        "title_seg": copy.deepcopy(tracks[4]["segments"][0]),      # 模板 track[4]=title
+        "audio_seg": copy.deepcopy(tracks[5]["segments"][0]),      # 模板 track[5]=audio
         "text_mat": copy.deepcopy(mats["texts"][0]),
         "audio_mat": copy.deepcopy(mats["audios"][0]),
         "speed": copy.deepcopy(mats["speeds"][0]) if mats.get("speeds") else None,
@@ -182,6 +194,7 @@ def _deep_clone_prototypes(template: dict) -> dict:
         "sound": copy.deepcopy(mats["sound_channel_mappings"][0]) if mats.get("sound_channel_mappings") else None,
         "ph": copy.deepcopy(mats["placeholder_infos"][0]) if mats.get("placeholder_infos") else None,
         "vocal": copy.deepcopy(mats["vocal_separations"][0]) if mats.get("vocal_separations") else None,
+        "loudness": copy.deepcopy(mats["loudnesses"][0]) if mats.get("loudnesses") else None,
         "beat": copy.deepcopy(mats["beats"][0]) if mats.get("beats") else None,
     }
 
@@ -206,7 +219,7 @@ def _remap_aux_ids(draft: dict) -> dict:
 
 
 def _build_video_refs(draft: dict, index: int, anim_offset: int = 0) -> list:
-    """为第 index 个视频段构建 extra_material_refs (7项)
+    """为第 index 个视频段构建 extra_material_refs (8项)
     anim_offset: 视频动画在 material_animations 数组中的偏移补偿
     (因为模板中文字动画排在视频动画后面, 追加的视频动画索引需要跳过模板文字动画)"""
     return [
@@ -216,6 +229,7 @@ def _build_video_refs(draft: dict, index: int, anim_offset: int = 0) -> list:
         draft["materials"]["material_animations"][index + anim_offset]["id"],
         draft["materials"]["sound_channel_mappings"][index]["id"],
         draft["materials"]["material_colors"][index]["id"],
+        draft["materials"]["loudnesses"][index]["id"],
         draft["materials"]["vocal_separations"][index]["id"],
     ]
 
@@ -239,12 +253,13 @@ def _build_text_ref(draft: dict, index: int) -> list:
 
 
 def _append_aux_for_video(draft: dict, proto: dict, duration_us: int = None):
-    """为新增的视频段追加一份全套辅助材料 (不含 beats), 更新动画时长"""
+    """为新增的视频段追加一份全套辅助材料 (含 loudnesses), 更新动画时长"""
     for cat, pkey in [
         ("canvases", "canvas"), ("speeds", "speed"),
         ("material_animations", "anim"), ("material_colors", "color"),
         ("sound_channel_mappings", "sound"),
-        ("placeholder_infos", "ph"), ("vocal_separations", "vocal"),
+        ("placeholder_infos", "ph"), ("loudnesses", "loudness"),
+        ("vocal_separations", "vocal"),
     ]:
         if proto.get(pkey) is None:
             continue
@@ -353,58 +368,107 @@ def export_jianying_draft_v11(
     res_dir = os.path.join(draft_dir, "Resources")
     os.makedirs(res_dir, exist_ok=True)
 
-    # ====== 线框嵌入方案：把暖白线框直接合成到图片上 ======
-    # 剪映视频轨不支持 RGBA alpha → matte 遮罩方案失败
-    # 改为每张图预先复合到 1080×1920 画布：藏青底 + 暖白线 + 图片居中
-    framed_image_paths = []
+    # ====== v3 遮盖条架构: BG + 图片 + 上下遮盖条 ======
+    # 原理: 图片独立缩放, 上下藏青遮盖条(纯RGB, 无需alpha)挡在图片上层
+    # 图片 1080×1214 放在 y=377, Ken Burns 1.0→1.12 缩放
+    # 上遮盖: 1080×377 藏青底+暖白上线(y=373-377), 放在 y=0
+    # 下遮盖: 1080×329 暖白下线(y=0-4)+藏青底, 放在 y=1591
+    # 遮盖映射: 图片溢出部分被同色藏青遮盖 → 线框始终静态
+
+    # BG: 纯藏青底板 1080×1920 (RGB, 无alpha)
+    bg_path = os.path.join(res_dir, "_bg_navy.png")
+    bg_img = PILImage.new("RGB", (1080, 1920), (7, 23, 48))
+    bg_img.save(bg_path, "PNG")
+
+    # 上遮盖: 1080×377 (藏青 + 暖白上线 at bottom)
+    cover_top_path = os.path.join(res_dir, "_cover_top.png")
+    cover_top = PILImage.new("RGB", (1080, 377), (7, 23, 48))
+    cover_top_draw = ImageDraw.Draw(cover_top)
+    cover_top_draw.rectangle([0, 373, 1080, 377], fill=(232, 228, 212))  # 暖白线
+    cover_top.save(cover_top_path, "PNG")
+
+    # 下遮盖: 1080×329 (暖白下线 at top + 藏青)
+    cover_bot_path = os.path.join(res_dir, "_cover_bot.png")
+    cover_bot = PILImage.new("RGB", (1080, 329), (7, 23, 48))
+    cover_bot_draw = ImageDraw.Draw(cover_bot)
+    cover_bot_draw.rectangle([0, 0, 1080, 4], fill=(232, 228, 212))  # 暖白线
+    cover_bot.save(cover_bot_path, "PNG")
+
+    # 图片: 保持原尺寸 1080×1214, resize 到目标尺寸
+    resized_image_paths = []
     for i, img_path in enumerate(image_paths):
-        canvas = PILImage.new("RGB", (1080, 1920), (7, 23, 48))  # #071730 藏青底
         try:
             img = PILImage.open(img_path).convert("RGB")
             if img.size != (1080, 1214):
                 img = img.resize((1080, 1214), PILImage.LANCZOS)
-            canvas.paste(img, (0, 377))  # 图片贴在 y=377（上线 373+4px 之下）
+            resized_path = os.path.join(res_dir, f"img_{i:03d}.png")
+            img.save(resized_path, "PNG")
+            resized_image_paths.append(resized_path.replace("\\", "/"))
         except Exception:
-            pass  # 图片加载失败则留纯底
-        draw = ImageDraw.Draw(canvas)
-        # 上线: y=373, 4px 暖白
-        draw.rectangle([0, 373, 1080, 377], fill=(232, 228, 212))
-        # 下线: y=1591, 4px 暖白
-        draw.rectangle([0, 1591, 1080, 1595], fill=(232, 228, 212))
-        framed_path = os.path.join(res_dir, f"framed_{i:03d}.png")
-        canvas.save(framed_path, "PNG")
-        framed_image_paths.append(framed_path.replace("\\", "/"))
+            resized_image_paths.append(image_paths[i].replace("\\", "/"))
 
-    # ======== 3. 替换视频材料 (IN-PLACE: 前N个改内容, 其余追加) ========
-    # ★ 使用预复合的 framed 图片 (1080×1920, 线框已嵌入，无需 matte/BG 轨)
+    # ======== 3. 替换视频材料 (v3: 图片1080×1214 + BG + 遮盖条) ========
     tmpl_vid_count = len(draft["materials"]["videos"])
+
+    # 3a. 图片: 1080×1214, 每句一张 (IN-PLACE + APPEND)
     for i in range(min(tmpl_vid_count, n_sentences)):
         draft["materials"]["videos"][i]["id"] = _uid()
         draft["materials"]["videos"][i]["material_id"] = draft["materials"]["videos"][i]["id"]
-        draft["materials"]["videos"][i]["path"] = framed_image_paths[i]
-        draft["materials"]["videos"][i]["material_name"] = f"framed_{i:03d}.png"
+        draft["materials"]["videos"][i]["path"] = resized_image_paths[i]
+        draft["materials"]["videos"][i]["material_name"] = f"img_{i:03d}.png"
         draft["materials"]["videos"][i]["width"] = 1080
-        draft["materials"]["videos"][i]["height"] = 1920
+        draft["materials"]["videos"][i]["height"] = 1214
 
     for i in range(tmpl_vid_count, n_sentences):
         vm = copy.deepcopy(proto["video_mat"])
         vm["id"] = _uid()
         vm["material_id"] = vm["id"]
-        vm["path"] = framed_image_paths[i]
-        vm["material_name"] = f"framed_{i:03d}.png"
+        vm["path"] = resized_image_paths[i]
+        vm["material_name"] = f"img_{i:03d}.png"
         vm["width"] = 1080
-        vm["height"] = 1920
+        vm["height"] = 1214
         draft["materials"]["videos"].append(vm)
 
     # 删除多余的模板视频
     if tmpl_vid_count > n_sentences:
         del draft["materials"]["videos"][n_sentences:]
 
+    # 3b. 追加 BG + 上下遮盖条 材料 (索引 N, N+1, N+2)
+    bg_mat = copy.deepcopy(proto["video_mat"])
+    bg_mat["id"] = _uid()
+    bg_mat["material_id"] = bg_mat["id"]
+    bg_mat["path"] = bg_path.replace("\\", "/")
+    bg_mat["material_name"] = "_bg_navy.png"
+    bg_mat["width"] = 1080
+    bg_mat["height"] = 1920
+    draft["materials"]["videos"].append(bg_mat)
+    bg_vid_idx = n_sentences  # BG 在 videos 数组中的索引
+
+    cover_top_mat = copy.deepcopy(proto["video_mat"])
+    cover_top_mat["id"] = _uid()
+    cover_top_mat["material_id"] = cover_top_mat["id"]
+    cover_top_mat["path"] = cover_top_path.replace("\\", "/")
+    cover_top_mat["material_name"] = "_cover_top.png"
+    cover_top_mat["width"] = 1080
+    cover_top_mat["height"] = 377
+    draft["materials"]["videos"].append(cover_top_mat)
+    cover_top_vid_idx = bg_vid_idx + 1
+
+    cover_bot_mat = copy.deepcopy(proto["video_mat"])
+    cover_bot_mat["id"] = _uid()
+    cover_bot_mat["material_id"] = cover_bot_mat["id"]
+    cover_bot_mat["path"] = cover_bot_path.replace("\\", "/")
+    cover_bot_mat["material_name"] = "_cover_bot.png"
+    cover_bot_mat["width"] = 1080
+    cover_bot_mat["height"] = 329
+    draft["materials"]["videos"].append(cover_bot_mat)
+    cover_bot_vid_idx = cover_top_vid_idx + 1
+
     # ======== 4. 替换文字材料 ========
     from services.video_service import _split_natural_phrases, _strip_subtitle_punct, _count_cjk
 
     # 模板文字布局: [sub0..sub13] [upper] [lower1] [lower2] = 14 + 3 = 17
-    tmpl_sub_text_count = len(template["tracks"][TRACK_SUBTITLE]["segments"])  # 14
+    tmpl_sub_text_count = len(template["tracks"][1]["segments"])  # 模板 track[1] = subtitle
     tmpl_title_text_start = tmpl_sub_text_count  # 14
     tmpl_text_count = len(template["materials"]["texts"])  # 17
 
@@ -598,16 +662,56 @@ def export_jianying_draft_v11(
     # ======== 6. 辅助材料: 先 remap, 再追加 ========
     _remap_aux_ids(draft)
 
-    # 关键: 模板的 material_animations 排列 = [N_video] + [N_text]
-    # 追加后排列 = [N_video] + [N_text_template] + [new_video] + [new_text]
-    # 所以追加视频的 anim 索引需要跳过模板文字动画 (anim_offset)
-    tmpl_anim_count = len(draft["materials"]["material_animations"])  # 20
-    anim_offset_for_new_video = tmpl_anim_count - tmpl_vid_count      # 17 (模板文字动画数)
-    anim_base_for_new_text = tmpl_anim_count + (n_sentences - tmpl_vid_count)  # 新文字的 anim 起始索引
+    # ★ 更新所有视频 material_animations 引用自定义 Ken Burns 效果
+    kenburns_effect_path = EFFECTS_DIR.replace("\\", "/")
+    kenburns_resource_id = 99990001  # 自定义效果资源ID
+    for anim in draft["materials"]["material_animations"]:
+        for inner in anim.get("animations", []):
+            if inner.get("type") == "group" and inner.get("category_name") == "收藏":
+                inner["path"] = kenburns_effect_path
+                inner["resource_id"] = kenburns_resource_id
+                inner["third_resource_id"] = kenburns_resource_id
+                inner["id"] = kenburns_resource_id
 
-    # 追加新视频段所需的辅助材料
+    # 关键: 模板的 material_animations 排列 = [N_video_template] + [N_text]
+    # 新增后 = [N_video_effective] + [N_text_template] + [new_video] + [new_text]
+    # 记: new_video_anim 在前, new_text_anim 在后
+    tmpl_anim_count = len(draft["materials"]["material_animations"])
+    anim_offset_for_new_video = tmpl_anim_count - tmpl_vid_count
+    anim_base_for_new_text = tmpl_anim_count + (n_sentences - tmpl_vid_count) + 3  # +3 for BG+covers
+
+    # 追加新视频段所需的辅助材料 (图片超出模板的部分)
     for i in range(tmpl_vid_count, n_sentences):
         _append_aux_for_video(draft, proto, duration_us=int(seg_durations_us[i]))
+
+    # 追加 BG 辅助材料 (无动画)
+    _append_aux_for_video(draft, proto, duration_us=total_dur)
+    # BG 的动画清空 (BG不需要缩放)
+    bg_anim = draft["materials"]["material_animations"][bg_vid_idx + anim_offset_for_new_video]
+    bg_anim["animations"] = []
+
+    # 追加上遮盖条辅助材料 (无动画)
+    _append_aux_for_video(draft, proto, duration_us=total_dur)
+    cover_top_anim = draft["materials"]["material_animations"][cover_top_vid_idx + anim_offset_for_new_video]
+    cover_top_anim["animations"] = []
+
+    # 追加下遮盖条辅助材料 (无动画)
+    _append_aux_for_video(draft, proto, duration_us=total_dur)
+    cover_bot_anim = draft["materials"]["material_animations"][cover_bot_vid_idx + anim_offset_for_new_video]
+    cover_bot_anim["animations"] = []
+
+    # ★ 更新所有图片动画为自定义 Ken Burns (已在 remap 后, 索引正确)
+    for i in range(n_sentences):
+        img_anim_idx = i + anim_offset_for_new_video if i >= tmpl_vid_count else i
+        if img_anim_idx < len(draft["materials"]["material_animations"]):
+            anim = draft["materials"]["material_animations"][img_anim_idx]
+            for inner in anim.get("animations", []):
+                if inner.get("type") == "group":
+                    inner["path"] = kenburns_effect_path
+                    inner["resource_id"] = kenburns_resource_id
+                    inner["third_resource_id"] = kenburns_resource_id
+                    inner["id"] = kenburns_resource_id
+                    inner["duration"] = int(seg_durations_us[i])  # 匹配片段时长
 
     # 追加新文字段所需的 material_animations
     # 新文字 = 实际总文字 - 模板已占文字
@@ -615,10 +719,23 @@ def export_jianying_draft_v11(
     for gi in range(tmpl_text_count, total_text):
         _append_aux_for_text(draft, proto)
 
-    # ======== 7. 生成视频段 (track[0]) ========
-    # 不依赖模板初始段数，全部从 proto 复制重建，保证每张图独立可替换
-    tmpl_vid_segs = len(template["tracks"][TRACK_VIDEO]["segments"])
-    draft["tracks"][TRACK_VIDEO]["segments"] = []
+    # ======== 7. 生成视频段 (v3: BG + 图片 + 遮盖条, 4轨) ========
+    # 7a. BG 段 (track[0], 全时长, 静态, y=0)
+    draft["tracks"][TRACK_BG]["segments"] = []
+    bg_seg = copy.deepcopy(proto["video_seg"])
+    bg_seg["id"] = _uid()
+    bg_seg["material_id"] = draft["materials"]["videos"][bg_vid_idx]["id"]
+    bg_seg["source_timerange"]["duration"] = total_dur
+    bg_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
+    bg_anim_idx = bg_vid_idx + anim_offset_for_new_video
+    bg_seg["extra_material_refs"] = _build_video_refs(draft, bg_vid_idx, anim_offset_for_new_video)
+    bg_seg["clip"]["transform"]["y"] = 0.0
+    draft["tracks"][TRACK_BG]["segments"].append(bg_seg)
+
+    # 7b. 图片段 (track[1], 每句一张, y=377, Ken Burns 缩放)
+    # 模板视频轨在 TRACK_VIDEO=1 位置, 用 proto 重建
+    img_track = copy.deepcopy(template["tracks"][0])  # 从模板原视频轨深拷贝
+    img_track["segments"] = []
     time_cursor = 0.0
     for i in range(n_sentences):
         dur = seg_durations_us[i]
@@ -627,25 +744,38 @@ def export_jianying_draft_v11(
         seg["material_id"] = draft["materials"]["videos"][i]["id"]
         seg["source_timerange"]["duration"] = int(dur)
         seg["target_timerange"] = {"start": int(time_cursor), "duration": int(dur)}
-        # 前 tmpl_vid_count 个用模板原始动画索引，追加的用偏移补偿
         anim_offset = 0 if i < tmpl_vid_count else anim_offset_for_new_video
         seg["extra_material_refs"] = _build_video_refs(draft, i, anim_offset)
-        draft["tracks"][TRACK_VIDEO]["segments"].append(seg)
+        seg["clip"]["transform"]["y"] = -0.028  # y=377 in canvas coords
+        img_track["segments"].append(seg)
         time_cursor += dur
+    draft["tracks"].insert(TRACK_VIDEO, img_track)
 
-    # 图片定位: framed 图片已复合到 1080×1920 全画布，居中即可
-    # ★ 移除 Ken Burns 缩放动画: 线框已嵌入图片, 缩放会导致线框移动/溢出
-    for seg in draft["tracks"][TRACK_VIDEO]["segments"]:
-        seg["clip"]["transform"]["y"] = 0.0
-    # 清除所有视频段的动画 (线框嵌入方案不需要缩放特效)
-    vid_anim_ids = set()
-    for seg in draft["tracks"][TRACK_VIDEO]["segments"]:
-        # extra_material_refs[3] = material_animations id (在 _build_video_refs 中的第4个)
-        if len(seg.get("extra_material_refs", [])) >= 4:
-            vid_anim_ids.add(seg["extra_material_refs"][3])
-    for anim in draft["materials"]["material_animations"]:
-        if anim["id"] in vid_anim_ids:
-            anim["animations"] = []
+    # 7c. 上遮盖段 (track[2], 全时长, 静态, y=0)
+    cover_top_track = copy.deepcopy(template["tracks"][0])
+    cover_top_track["segments"] = []
+    ct_seg = copy.deepcopy(proto["video_seg"])
+    ct_seg["id"] = _uid()
+    ct_seg["material_id"] = draft["materials"]["videos"][cover_top_vid_idx]["id"]
+    ct_seg["source_timerange"]["duration"] = total_dur
+    ct_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
+    ct_seg["extra_material_refs"] = _build_video_refs(draft, cover_top_vid_idx, anim_offset_for_new_video)
+    ct_seg["clip"]["transform"]["y"] = -0.804  # y=188.5 canvas → JY: (188.5-960)/960, top edge at y=0
+    cover_top_track["segments"].append(ct_seg)
+    draft["tracks"].insert(TRACK_COVER_TOP, cover_top_track)
+
+    # 7d. 下遮盖段 (track[3], 全时长, 静态, y=1591)
+    cover_bot_track = copy.deepcopy(template["tracks"][0])
+    cover_bot_track["segments"] = []
+    cb_seg = copy.deepcopy(proto["video_seg"])
+    cb_seg["id"] = _uid()
+    cb_seg["material_id"] = draft["materials"]["videos"][cover_bot_vid_idx]["id"]
+    cb_seg["source_timerange"]["duration"] = total_dur
+    cb_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
+    cb_seg["extra_material_refs"] = _build_video_refs(draft, cover_bot_vid_idx, anim_offset_for_new_video)
+    cb_seg["clip"]["transform"]["y"] = 0.829  # y=1591 canvas → JY: (1755.5-960)/960
+    cover_bot_track["segments"].append(cb_seg)
+    draft["tracks"].insert(TRACK_COVER_BOT, cover_bot_track)
 
     # ======== 8. 生成字幕段 (track[1], 对标 V5 bench 自然断句) ========
     tmpl_sub_segs = len(draft["tracks"][TRACK_SUBTITLE]["segments"])
@@ -738,16 +868,17 @@ def export_jianying_draft_v11(
     else:
         draft["tracks"][TRACK_TITLE]["segments"] = []
 
-    # ======== 12. 生成音频段 (track[5], 1段) ========
+    # ======== 12. 生成音频段 (track[8], 1段) ========
     # 清理音频辅助材料: 模板多个音段→只留 1 份
-    # 共享数组 (speeds/ph/sounds/vocals): 保留 N_video + 1 项
-    # beats: 保留 1 项 (音频专属)
+    # 共享数组: N_images + 3(BG+covers) + 1(audio) = N+4 项
+    total_video_count = n_sentences + 3  # images + BG + 2 covers
+    audio_aux_index = total_video_count  # 音频辅助在所有视频之后
     for cat in ["speeds", "placeholder_infos", "sound_channel_mappings", "vocal_separations"]:
         items = draft["materials"].get(cat, [])
-        if len(items) > n_sentences + 1:
-            del items[n_sentences + 1:]
-        # 确保至少有 n_sentences + 1 项
-        while len(items) < n_sentences + 1:
+        if len(items) > total_video_count + 1:
+            del items[total_video_count + 1:]
+        # 确保至少有 total_video_count + 1 项
+        while len(items) < total_video_count + 1:
             m = copy.deepcopy(proto[{"speeds":"speed","placeholder_infos":"ph","sound_channel_mappings":"sound","vocal_separations":"vocal"}[cat]])
             m["id"] = _uid()
             items.append(m)
@@ -763,8 +894,8 @@ def export_jianying_draft_v11(
     audio_seg["material_id"] = draft["materials"]["audios"][0]["id"]
     audio_seg["source_timerange"]["duration"] = total_dur
     audio_seg["target_timerange"] = _mk_target_timerange(0, total_dur)
-    # 音频 refs 用 n_sentences 作为索引（音频辅助在视频之后）
-    audio_seg["extra_material_refs"] = _build_audio_refs(draft, n_sentences)
+    # 音频 refs 用 total_video_count 作为索引（音频辅助在所有视频辅助之后）
+    audio_seg["extra_material_refs"] = _build_audio_refs(draft, audio_aux_index)
     # 删除多余模板音频段
     if len(draft["tracks"][TRACK_AUDIO]["segments"]) > 1:
         del draft["tracks"][TRACK_AUDIO]["segments"][1:]
@@ -857,7 +988,10 @@ def export_jianying_draft_v11(
             _encrypt_file(os.path.join(dp, "draft_content.json"))
 
     # 素材大小
-    total_mat_size = sum(os.path.getsize(p) for p in framed_image_paths if os.path.exists(p))
+    total_mat_size = sum(os.path.getsize(p) for p in resized_image_paths if os.path.exists(p))
+    total_mat_size += os.path.getsize(bg_path)
+    total_mat_size += os.path.getsize(cover_top_path)
+    total_mat_size += os.path.getsize(cover_bot_path)
     if os.path.exists(audio_path):
         total_mat_size += os.path.getsize(audio_path)
 
