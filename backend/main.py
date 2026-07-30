@@ -220,7 +220,7 @@ class RegenerateSegmentRequest(BaseModel):
     task_id: int
     segment_index: int     # 从 0 开始的段号
     text: str              # 该段的文本内容
-    voice: str = "zf_xiaoqiu"
+    voice: str = "vc_clone_wanglq"
     rate: str = "+0%"
 
 
@@ -337,6 +337,7 @@ class RegenerateSegmentImageRequest(BaseModel):
     segment_index: int
     style: str = "default"
     aspect_ratio: str = "9:16"  # "9:16" | "16:9"
+    custom_prompt: str | None = None  # 用户自定义 prompt（覆盖默认提示词）
 
 
 class RegenerateSegmentImageResponse(BaseModel):
@@ -1629,6 +1630,7 @@ async def regenerate_segment_image(request: RegenerateSegmentImageRequest, db: S
         book_title=task.book_title or "",
         book_author=task.book_author or "",
         aspect_ratio=request.aspect_ratio,
+        custom_prompt=request.custom_prompt,
     )
 
     if "error" in result:
@@ -1645,6 +1647,16 @@ async def regenerate_segment_image(request: RegenerateSegmentImageRequest, db: S
         status=result["status"],
         message=result["message"],
     )
+
+
+@app.get("/api/images/prompt/{task_id}/{segment_index}")
+async def get_segment_prompt(task_id: int, segment_index: int):
+    """读取某段配图的 prompt 文本，供前端编辑"""
+    prompt_path = os.path.join(TASKS_DIR, str(task_id), "images", f"seg_{segment_index:03d}_prompt.txt")
+    if os.path.exists(prompt_path):
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return {"task_id": task_id, "segment_index": segment_index, "prompt": f.read()}
+    return {"task_id": task_id, "segment_index": segment_index, "prompt": ""}
 
 
 @app.get("/api/images/{task_id}", response_model=ImageListResponse)

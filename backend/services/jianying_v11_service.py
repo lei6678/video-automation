@@ -888,6 +888,55 @@ def export_jianying_draft_v11(
     dm["tm_draft_modified"] = NOW_US
     dm["tm_duration"] = total_dur
     dm["draft_new_version"] = "164.0.0"
+
+    # 重建 draft_materials: 模板遗留旧引用(seg_*.png/mp3)导致剪映打开报失效链接
+    def _make_mat_entry(file_path, filename, metetype, duration, width, height):
+        return {
+            "ai_group_type": "",
+            "create_time": 0,
+            "duration": duration,
+            "enter_from": 0,
+            "extra_info": filename,
+            "file_Path": file_path,
+            "height": height,
+            "id": str(uuid.uuid4()),
+            "import_time": 0,
+            "import_time_ms": 0,
+            "item_source": 1,
+            "material_color_tag": "",
+            "md5": "",
+            "metetype": metetype,
+            "roughcut_time_range": {"duration": -1, "start": -1},
+            "sub_time_range": {"duration": -1, "start": -1},
+            "type": 0,
+            "width": width,
+        }
+
+    mat_value = []
+
+    # 内容图片: img_000.png ~ img_{N-1}.png (1080×1214)
+    for i in range(n_sentences):
+        mat_value.append(_make_mat_entry(
+            f"./Resources/img_{i:03d}.png", f"img_{i:03d}.png",
+            "photo", 5000000, 1080, 1214))
+
+    # 遮盖条
+    mat_value.append(_make_mat_entry(
+        "./Resources/cover_top.png", "cover_top.png", "photo", 5000000, 1080, 377))
+    mat_value.append(_make_mat_entry(
+        "./Resources/cover_bot.png", "cover_bot.png", "photo", 5000000, 1080, 329))
+
+    # 配音音频
+    audio_filename = os.path.basename(audio_path)
+    mat_value.append(_make_mat_entry(
+        audio_path.replace("\\", "/"), audio_filename, "music", total_dur, 0, 0))
+
+    dm["draft_materials"] = [
+        {"type": 0, "value": mat_value},
+        {"type": 1, "value": []}, {"type": 2, "value": []}, {"type": 3, "value": []},
+        {"type": 6, "value": []}, {"type": 7, "value": []}, {"type": 8, "value": []},
+    ]
+
     with open(dm_path, "w", encoding="utf-8") as f:
         json.dump(dm, f, ensure_ascii=False, indent=2)
     _encrypt_file(dm_path)

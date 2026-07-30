@@ -28,13 +28,7 @@ load_dotenv()
 # ============== 凭证 ==============
 FAL_KEY = os.getenv("FAL_KEY", "")
 FAL_QUALITY = os.getenv("FAL_QUALITY", "low")  # low | medium | high，默认 low（成本控制）
-
-KELING_API_KEY = os.getenv("KELING_API_KEY", "")
-KELING_BASE_URL = os.getenv("KELING_BASE_URL", "https://api.kuaishou.com/keling/v1")
-
-# ============== 模型配置 ==============
 FAL_MODEL = "openai/gpt-image-2"
-KELING_IMAGE_MODEL = "keling-v1"
 
 
 # ============== 样式圣经库（来自大佬白皮书）==============
@@ -75,6 +69,22 @@ STYLE_BIBLES = {
         "ordinary people in quiet moments of dignity, "
         "inspired by Wong Kar-wai and Zhang Yimou's early works"
     ),
+    "wong_kar_wai": (
+        "Wong Kar-wai cinematic aesthetic, rain-soaked neon streets, saturated reds and greens, "
+        "slow shutter drag with motion blur, step-printing rhythm, "
+        "intimate close-ups, shallow focus, 85mm portrait lens, "
+        "nostalgic 1960s Hong Kong atmosphere, rich film grain, "
+        "high contrast chiaroscuro, dreamlike color wash, "
+        "solitary figures in crowded spaces, emotional texture over plot"
+    ),
+    "warm_docu": (
+        "warm natural tones throughout, consistent cohesive color palette, "
+        "soft daylight, gentle shadows, no dramatic color shifts, "
+        "documentary photography, editorial magazine composition, "
+        "ordinary people in authentic unposed moments, clean composition, "
+        "warm browns + muted amber + soft cream, natural textures, "
+        "medium format film look, honest and grounded aesthetic"
+    ),
 }
 
 # ============== 风格后缀（v5：英文视觉修饰词，注入 Fal.ai prompt）==============
@@ -100,6 +110,18 @@ STYLE_PROMPT_MAP = {
         ", cinematic photography, atmospheric lighting, rich textures, "
         "award-winning composition, elegant, timeless"
     ),
+    "wong_kar_wai": (
+        ", Wong Kar-wai film aesthetic, 85mm lens, shallow depth of field, "
+        "beautiful bokeh, photorealistic, ultra-high definition, masterpiece, "
+        "highly detailed skin texture, rich cinematic contrast, "
+        "nostalgic retro film aesthetic"
+    ),
+    "warm_docu": (
+        ", warm natural tones, consistent cohesive color palette, "
+        "soft daylight, gentle shadows, documentary photography style, "
+        "editorial composition, authentic unposed feel, "
+        "medium format film, honest and grounded aesthetic"
+    ),
 }
 
 # ============== 画面后置防线 ==============
@@ -110,14 +132,7 @@ SAFETY_SUFFIX = (
     "masterpiece composition, no text, no watermark, no graphic overlay"
 )
 
-# ============== v7 全局风格锁（对标 Gemini 分析 — 每张图末尾强制注入）==============
-
-STYLE_LOCK = (
-    "Wong Kar-wai film aesthetic, 85mm lens, shallow depth of field, "
-    "beautiful bokeh, photorealistic, ultra-high definition, masterpiece, "
-    "highly detailed skin texture, rich cinematic contrast, "
-    "nostalgic retro film aesthetic"
-)
+# ============== 王家卫电影感（v10：从全局锁改为可选风格）==============
 
 # ============== v7 情绪光影字典（对标题 Gemini 分析报告3）==============
 
@@ -264,7 +279,7 @@ async def plan_visual_arc(
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -275,6 +290,7 @@ async def plan_visual_arc(
             if resp.status_code == 200:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                finish_reason = data["choices"][0].get("finish_reason", "unknown")
                 if content.startswith("```"):
                     content = content.split("\n", 1)[1].rstrip("```").strip()
                 plan = json.loads(content)
@@ -286,6 +302,17 @@ async def plan_visual_arc(
                 return {}
     except Exception as e:
         print(f"[image:plan] Failed: {type(e).__name__}: {e}")
+        finish_info = ""
+        try:
+            finish_info = f"finish_reason={finish_reason}"
+        except Exception:
+            finish_info = "finish_reason=N/A"
+        content_info = ""
+        try:
+            content_info = f"len={len(content)}, tail={content[-200:]}"
+        except Exception:
+            content_info = "content=N/A"
+        print(f"[image:plan] {finish_info}, {content_info}")
         return {}
 
 
@@ -413,7 +440,7 @@ async def generate_screenplay(
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -424,6 +451,7 @@ async def generate_screenplay(
             if resp.status_code == 200:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                finish_reason = data["choices"][0].get("finish_reason", "unknown")
                 if content.startswith("```"):
                     content = content.split("\n", 1)[1].rstrip("```").strip()
                 screenplay = json.loads(content)
@@ -436,6 +464,17 @@ async def generate_screenplay(
                 return {}
     except Exception as e:
         print(f"[image:screenplay] Failed: {type(e).__name__}: {e}")
+        finish_info = ""
+        try:
+            finish_info = f"finish_reason={finish_reason}"
+        except Exception:
+            finish_info = "finish_reason=N/A"
+        content_info = ""
+        try:
+            content_info = f"len={len(content)}, tail={content[-200:]}"
+        except Exception:
+            content_info = "content=N/A"
+        print(f"[image:screenplay] {finish_info}, {content_info}")
         return {}
 
 
@@ -547,7 +586,7 @@ async def generate_storyboard(
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -558,6 +597,7 @@ async def generate_storyboard(
             if resp.status_code == 200:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                finish_reason = data["choices"][0].get("finish_reason", "unknown")
                 if content.startswith("```"):
                     content = content.split("\n", 1)[1].rstrip("```").strip()
                 storyboard = json.loads(content)
@@ -569,6 +609,18 @@ async def generate_storyboard(
                 return {}
     except Exception as e:
         print(f"[image:storyboard] Failed: {type(e).__name__}: {e}")
+        # 诊断：打印原始响应长度和finish_reason，区分截断 vs 模型输出坏JSON
+        finish_info = ""
+        try:
+            finish_info = f"finish_reason={finish_reason}"
+        except Exception:
+            finish_info = "finish_reason=N/A"
+        content_info = ""
+        try:
+            content_info = f"len={len(content)}, tail={content[-200:]}"
+        except Exception:
+            content_info = "content=N/A"
+        print(f"[image:storyboard] {finish_info}, {content_info}")
         return {}
 
 
@@ -675,192 +727,6 @@ def _sanitize_prompt(prompt: str) -> str:
     return result
 
 
-async def _llm_sanitize_segment(
-    sentence: str,
-    book_title: str = "",
-    book_author: str = "",
-    segment_index: int = 0,
-    total_segments: int = 1,
-    visual_context: str = "",
-) -> str:
-    """用 DeepSeek 将原文的一句话改写为"画面安全但同情绪、同场景"的视觉描述。
-
-    只用于生图 prompt 构建，不影响配音/字幕/rewritten.txt。
-    触发条件：全文级 sanitize 无法匹配的关键词，但 Fal.ai 语义审查拒绝通过
-    （如集中描写死亡、流血、极端贫困、儿童苦难等高度悲剧性段落）。
-
-    改写约束：
-    - 保留场景、人物关系、情绪基调（悲悯→克制伤感，苦难→坚韧）
-    - 去掉具象的血腥/死亡/虐待描写，转为含蓄的肢体语言、环境氛围、象征意象
-    - 仍然是一段约 18 秒口播对应的画面场次描述
-    - 输出纯文本，不附带任何解释
-    """
-
-    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
-    if not deepseek_key:
-        print("[image:llm-sanitize] DEEPSEEK_API_KEY 未设置，跳过")
-        return sentence
-
-    context_block = ""
-    if visual_context.strip():
-        context_block = f"\n故事全局视觉档案:\n{visual_context.strip()}"
-
-    system_msg = (
-        "你是一个影视分镜改写助手。你的任务是把原文中可能触发图像 AI 内容审查的"
-        "具象负面描写（血腥、死亡、暴力、虐待、极端苦难等），改写成一段**含蓄但同情绪、"
-        "同场景的视觉画面描述**。"
-        "\n\n约束："
-        "\n1. 保留原场景、人物位置关系、情绪基调（比如「压抑的悲伤」→「克制地低头沉默」）"
-        "\n2. 用肢体语言、光影、环境氛围、象征意象来代替具象负面描写"
-        "\n3. 输出长度应与原句接近（短句写短，长句可稍长），仅输出改写后的纯文本"
-        "\n4. 不要添加「画面中」「场景：」「图中」等引导词，直接输出描述"
-        "\n5. 不要输出解释或 markdown"
-    )
-    user_msg = (
-        f"原句:\n{sentence}\n\n"
-        f"背景: 全书「{book_title}」，作者 {book_author}，"
-        f"第 {segment_index + 1}/{total_segments} 个分镜。{context_block}\n\n"
-        f"请只输出改写后的画面描述（不含引导词、不含解释）："
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as http:
-            resp = await http.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                json={
-                    "model": "deepseek-v4-flash",
-                    "messages": [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    "temperature": 0.6,
-                    "max_tokens": 200,
-                },
-                headers={
-                    "Authorization": f"Bearer {deepseek_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                rewritten = data["choices"][0]["message"]["content"].strip()
-                if rewritten and rewritten != sentence:
-                    print(
-                        f"[image:llm-sanitize] 段 {segment_index + 1} LLM 安全改写成功 "
-                        f"({len(sentence)}→{len(rewritten)} 字)"
-                    )
-                    return rewritten
-                else:
-                    print(f"[image:llm-sanitize] 段 {segment_index + 1} LLM 返回与原文相同，跳过")
-                    return sentence
-            else:
-                print(f"[image:llm-sanitize] DeepSeek API 错误 {resp.status_code}: {resp.text[:150]}")
-                return sentence
-    except httpx.TimeoutException:
-        print(f"[image:llm-sanitize] 段 {segment_index + 1} 超时 (15s)，跳过")
-        return sentence
-    except Exception as e:
-        print(f"[image:llm-sanitize] 段 {segment_index + 1} 异常: {type(e).__name__}: {e}")
-        return sentence
-
-
-def _build_generic_prompt(
-    book_title: str,
-    book_author: str,
-    segment_index: int,
-    total_segments: int,
-    style_bible: str,
-    aspect_ratio: str,
-    visual_context: str = "",
-) -> str:
-    """当原文内容被所有内容审查拒绝后，构建不引用原文的通用配图 prompt。
-
-    按分镜序号轮换场景模板；若有 visual_context，从档案中提取情绪基调
-    和典型环境来影响场景选择，避免兜底图与故事整体氛围割裂。
-    """
-    # 8 套场景模板
-    scenes = [
-        ("温暖阳光透过窗格洒在书页上",
-         "暖金色光线，微尘在光束中漂浮，画面安静克制"),
-        ("一条延伸向远方的林间小路",
-         "晨雾弥漫，路旁野花星星点点，逆光拍摄，空气通透"),
-        ("一张老式木桌上摊开的笔记本和一支钢笔",
-         "侧光从左边打来，桌面纹理清晰，笔尖有墨迹，极简构图"),
-        ("傍晚时分远处山顶的天空剪影",
-         "橙蓝渐变天色，山脊线干净利落，长焦远景，心境辽阔"),
-        ("雨后的老街石板路，积水倒映着路灯",
-         "湿润的反光，两侧老墙青苔斑驳，纵深构图，宁静克制"),
-        ("厨房窗台上的玻璃花瓶，插着几枝野花",
-         "逆光透射花瓣纹理，背景虚化成柔光斑，生活感静谧"),
-        ("一个人站在海边，面向无尽的大海",
-         "背影构图，海浪轻拍脚边，灰蓝色调，极简留白"),
-        ("旧书架上排列整齐的书脊",
-         "低饱和色彩，侧光勾勒书脊边缘，浅景深，知识氛围"),
-    ]
-    scene_desc, scene_light = scenes[segment_index % len(scenes)]
-
-    # 从视觉档案提取 context_boost 注入风格描述
-    context_boost = ""
-    if visual_context.strip():
-        # 提取档案中的情绪基调关键词
-        mood_match = re.search(r'情绪基调[：:]\s*(.*)', visual_context, re.IGNORECASE)
-        env_match = re.search(r'典型环境[：:]\s*(.*)', visual_context, re.IGNORECASE)
-        body_match = re.search(r'身体特征[（(]极度重要.*?[）)]\s*[：:]\s*(.*)', visual_context, re.IGNORECASE | re.DOTALL)
-        mood = mood_match.group(1).strip() if mood_match else ""
-        env = env_match.group(1).strip() if env_match else ""
-        body = body_match.group(1).strip() if body_match else ""
-        parts = []
-        if body and body != "无":
-            parts.append(f"主人公固定身体特征：{body}")
-        if env:
-            parts.append(f"故事环境：{env}")
-        if mood:
-            parts.append(f"画面情绪：{mood}")
-        if parts:
-            context_boost = "；".join(parts)
-
-    # 8:9 近方形卡片版式：额外构图约束（对标满宽大图展示区）
-    if aspect_ratio == "8:9":
-        aspect_line = (
-            "8:9 近正方形竖版构图，主体居中、略偏上，四周留出呼吸空间，"
-            "关键元素不贴边（成片满宽出血展示，无裁切余量）"
-        )
-    else:
-        aspect_line = f"{aspect_ratio}，主体放在中央安全区，方便后期排版。"
-
-    prompt = f"""为中文短视频口播生成一张独立意境配图。
-
-最终用途:
-这张图作为短视频的连续分镜之一，对应一段约 18 秒的口播配音。
-
-画幅要求:
-{aspect_line}
-
-主题方向:
-图书启发、认知成长、人生感悟、关系洞察、命运转折。
-
-统一视觉风格:
-{style_bible}
-
-风格要求:
-明亮电影感，真实摄影或高级插画风
-光线自然，画面干净，低信息密度
-与同一条视频的其他配图保持相同视觉调性
-"""
-    if context_boost:
-        prompt += f"故事全局信息:{context_boost}\n"
-    prompt += f"""
-整条视频主题:{book_title}
-书籍作者:{book_author}
-当前分镜序号:第 {segment_index + 1}/{total_segments} 镜
-
-本次画面主题:{scene_desc}
-光线要求:{scene_light}
-
-请生成一张意境配图。不要加任何文字。"""
-    return prompt
-
-
 # ============== 情绪检测 → 自动匹配风格 ==============
 
 # 情绪关键词 → 最适合的 Style Bible
@@ -954,12 +820,7 @@ def build_single_segment_prompt(
     storyboard: Optional[dict] = None,
 ) -> str:
     """
-    v8 构建单句配图 Prompt（描述体，无元指令）。
-
-    优先级：storyboard (v8 分镜) > visual_plan (v7 旧版) > 降级模板。
-
-    最终 prompt 格式：
-    [中文场景描述]。[英文视觉词汇]。全局风格 + 质量词。
+    v8 构建单句配图 Prompt（仅 storyboard 分镜，无降级）。
     """
     _face_rules = {
         "show": "",
@@ -967,304 +828,77 @@ def build_single_segment_prompt(
                  "use back view, side profile, silhouette, or environmental wide shot. ",
     }
 
-    # === v8 优先：storyboard 分镜脚本（per-shot visual_subject + shot_type + character profile）===
-    if storyboard:
-        shots = storyboard.get("shots", [])
-        character_cast = storyboard.get("character_cast", [])
-        face_policy = storyboard.get("face_policy", "show")
-        face_rule = _face_rules.get(face_policy, "")
+    # === v8 分镜脚本（storyboard 必须存在且数据完整，否则跳过该段，不降级不浪费API）===
+    if not storyboard:
+        print(f"[image:prompt] seg {segment_index} 无 storyboard → 跳过, 不浪费API")
+        return ""
 
-        if shots and segment_index < len(shots):
-            shot = shots[segment_index]
-            if isinstance(shot, dict):
-                visual_subject = shot.get("visual_subject", "a figure")
-                shot_type = shot.get("shot_type", "medium")
-                composition = _sanitize_prompt(shot.get("composition", shot.get("scene_desc", "")))
-                emotion = shot.get("emotion", "daily")
-                character_ref = shot.get("character_ref", "")
-            else:
-                visual_subject = "a figure"
-                shot_type = "medium"
-                composition = _sanitize_prompt(str(shot))
-                emotion = "daily"
-                character_ref = ""
+    shots = storyboard.get("shots", [])
+    character_cast = storyboard.get("character_cast", [])
+    face_policy = storyboard.get("face_policy", "show")
+    face_rule = _face_rules.get(face_policy, "")
 
-            # 查找角色档案
-            char_profile = ""
-            if character_ref and character_cast:
-                for c in character_cast:
-                    if c.get("name", "") == character_ref:
-                        char_profile = (
-                            f"Character: {c.get('name', '')}, {c.get('gender', '')}, "
-                            f"age {c.get('age', '')}, {c.get('appearance', '')}. "
-                            f"Clothing: {c.get('clothing', '')}. "
-                            f"Body: {c.get('body_type', '')}. "
-                        )
-                        break
+    if segment_index >= len(shots):
+        print(f"[image:prompt] seg {segment_index} 分镜数据不足 (shots={len(shots)}) → 跳过, 不浪费API")
+        return ""
 
-            if composition:
-                emotion_light = get_emotion_lighting(emotion)
-                shot_hint = {
-                    "wide": "wide establishing shot, small figure in a large space",
-                    "medium": "medium shot, waist-up or full body",
-                    "close-up": "close-up shot, face or upper body dominates",
-                    "detail": "extreme close-up detail shot, no face, texture focus",
-                }.get(shot_type, "medium shot")
+    shot = shots[segment_index]
+    if not isinstance(shot, dict):
+        print(f"[image:prompt] seg {segment_index} shot 格式异常 → 跳过, 不浪费API")
+        return ""
 
-                prompt = (
-                    f"A cinematic photograph, 8:9 vertical, {shot_hint}. "
-                    f"Subject: {visual_subject}. "
-                    f"Scene: {composition}. "
-                    f"Lighting: {emotion_light}. "
-                    f"{char_profile}"
-                    f"{face_rule}"
-                    f"{STYLE_LOCK}. "
-                    f"single image, no text, no watermark"
+    visual_subject = shot.get("visual_subject", "")
+    shot_type = shot.get("shot_type", "medium")
+    composition = _sanitize_prompt(shot.get("composition", shot.get("scene_desc", "")))
+    emotion = shot.get("emotion", "daily")
+    character_ref = shot.get("character_ref", "")
+
+    if not composition:
+        print(f"[image:prompt] seg {segment_index} composition 为空 → 跳过, 不浪费API")
+        return ""
+
+    if not visual_subject:
+        visual_subject = "a figure"
+
+    # 查找角色档案
+    char_profile = ""
+    if character_ref and character_cast:
+        for c in character_cast:
+            if c.get("name", "") == character_ref:
+                char_profile = (
+                    f"Character: {c.get('name', '')}, {c.get('gender', '')}, "
+                    f"age {c.get('age', '')}, {c.get('appearance', '')}. "
+                    f"Clothing: {c.get('clothing', '')}. "
+                    f"Body: {c.get('body_type', '')}. "
                 )
-                print(
-                    f"[image:prompt] seg {segment_index} v8分镜, "
-                    f"subject={visual_subject}, shot={shot_type}, emotion={emotion}, len={len(prompt)}"
-                )
-                return prompt
+                break
 
-    # === v7 兼容：旧版 visual_plan（无 storyboard 时降级）===
-    if visual_plan and not storyboard:
-        protagonist = visual_plan.get("protagonist", "")
-        face_policy = visual_plan.get("face_policy", "show")
-        scenes = visual_plan.get("scenes", [])
-        face_rule = _face_rules.get(face_policy, "")
+    emotion_light = get_emotion_lighting(emotion)
+    shot_hint = {
+        "wide": "wide establishing shot, small figure in a large space",
+        "medium": "medium shot, waist-up or full body",
+        "close-up": "close-up shot, face or upper body dominates",
+        "detail": "extreme close-up detail shot, no face, texture focus",
+    }.get(shot_type, "medium shot")
 
-        if scenes and segment_index < len(scenes):
-            entry = scenes[segment_index]
-            if isinstance(entry, dict):
-                emotion = entry.get("emotion", "daily")
-                scene_desc = _sanitize_prompt(entry.get("scene", ""))
-            else:
-                emotion = "daily"
-                scene_desc = _sanitize_prompt(str(entry))
-
-            if scene_desc:
-                emotion_light = get_emotion_lighting(emotion)
-                prompt = (
-                    f"A cinematic photograph, 8:9 vertical. "
-                    f"Subject: {protagonist}. "
-                    f"Scene: {scene_desc}. "
-                    f"Lighting: {emotion_light}. "
-                    f"{face_rule}"
-                    f"{STYLE_LOCK}. "
-                    f"single image, no text, no watermark"
-                )
-                print(
-                    f"[image:prompt] seg {segment_index} v7情绪光影, "
-                    f"emotion={emotion}, len={len(prompt)}"
-                )
-                return prompt
-
-    # === 降级：旧版模板（无 visual_plan / storyboard 时使用）===
-    if not style_bible:
-        style_bible = STYLE_BIBLES.get("default", "")
-
-    # 8:9 竖版构图约束
-    if aspect_ratio == "8:9":
-        aspect_hint = (
-            "8:9 near-square vertical composition, subject centered slightly upper, "
-            "breathing room on all sides, full-bleed display with no crop margin"
-        )
-    else:
-        aspect_hint = f"{aspect_ratio} vertical, subject in safe center zone"
-
-    # 将中文文案转化为画面描述（而非指令）
     prompt = (
-        f"A cinematic vertical composition, {aspect_hint}. "
-        f"Scene inspired by the following narrative: {text.strip()} "
-        f""
-        f"Visual style: {style_bible}. "
-        f"no text, no watermark, no graphic overlay"
+        f"A cinematic photograph, 8:9 vertical, {shot_hint}. "
+        f"Subject: {visual_subject}. "
+        f"Scene: {composition}. "
+        f"Lighting: {emotion_light}. "
+        f"{char_profile}"
+        f"{face_rule}"
+        f"Style: {style_bible}. "
+        f"single image, no text, no watermark"
     )
-    print(f"[image:prompt] seg {segment_index} 降级模板, len={len(prompt)}")
+    print(
+        f"[image:prompt] seg {segment_index} v8分镜, "
+        f"subject={visual_subject}, shot={shot_type}, emotion={emotion}, len={len(prompt)}"
+    )
     return prompt
 
 
 # ============== 通道 A2：Fal.ai flux-dev（备选，人物一致性更强）==============
-
-async def _generate_fal_flux(
-    prompt: str,
-    width: int = 1080,
-    height: int = 1214,
-    num_inference_steps: int = 28,
-    guidance_scale: float = 3.5,
-) -> Optional[str]:
-    """
-    调用 Fal.ai fal-ai/flux/dev 生成图片。
-
-    Flux 在提示词遵循度和人物一致性上优于 gpt-image-2，
-    适合需要同一个人物出现在多张图片中的传记类内容。
-
-    Args:
-        prompt: 生图 prompt（英文自然语言，Flux 原生支持）
-        width, height: 画布尺寸（Flux 要求 8 的倍数，会自动对齐到 64 的倍数）
-        num_inference_steps: 推理步数（默认 28，越高品质越好但越慢）
-        guidance_scale: 提示词引导强度（默认 3.5）
-
-    Returns:
-        base64 图片字符串，失败返回 None
-    """
-    if not FAL_KEY:
-        print("[image:flux] FAL_KEY 未设置")
-        return None
-
-    url = "https://fal.run/fal-ai/flux/dev"
-    headers = {
-        "Authorization": f"Key {FAL_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    # Flux 要求尺寸为 8 的倍数，向下对齐
-    original_w, original_h = width, height
-    width = (width // 8) * 8
-    height = (height // 8) * 8
-    if (width, height) != (original_w, original_h):
-        print(f"[image:flux] 尺寸对齐 8 倍数: {original_w}x{original_h} → {width}x{height}")
-
-    payload = {
-        "prompt": prompt,
-        "image_size": {"width": width, "height": height},
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
-        "sync_mode": True,
-    }
-
-    total_pixels = width * height
-    print(
-        f"[image:flux] 请求 fal-ai/flux/dev, "
-        f"size={width}x{height} ({total_pixels / 1e6:.1f}MP), "
-        f"steps={num_inference_steps}, guidance={guidance_scale}, "
-        f"prompt_len={len(prompt)}"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            images = data.get("images", [])
-            if images and len(images) > 0:
-                img = images[0]
-                img_url = img.get("url", "")
-
-                if img_url.startswith("data:"):
-                    b64 = img_url.split(",", 1)[1] if "," in img_url else img_url
-                    print(f"[image:flux] 生图成功 (data URI), base64_len={len(b64)}")
-                    return b64
-                elif img_url.startswith("http"):
-                    print(f"[image:flux] 生图成功, 从 URL 下载: {img_url[:80]}...")
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl:
-                        img_resp = await dl.get(img_url)
-                        if img_resp.status_code == 200:
-                            b64 = base64.b64encode(img_resp.content).decode("utf-8")
-                            print(f"[image:flux] 下载完成, base64_len={len(b64)}")
-                            return b64
-                else:
-                    print(f"[image:flux] 未知 URL 格式: {img_url[:100]}")
-                    return None
-            print(f"[image:flux] 返回数据无 images: {json.dumps(data, ensure_ascii=False)[:300]}")
-            return None
-        else:
-            err = resp.text[:500]
-            print(f"[image:flux] API 错误 {resp.status_code}: {err}")
-            return None
-
-    except httpx.TimeoutException:
-        print("[image:flux] 请求超时 (300s)")
-        return None
-    except Exception as e:
-        print(f"[image:flux] 异常: {type(e).__name__}: {e}")
-        return None
-
-
-# ============== 通道 A3：Fal.ai flux-pro（高品质备选）==============
-
-async def _generate_fal_flux_pro(
-    prompt: str,
-    width: int = 1080,
-    height: int = 1214,
-    num_inference_steps: int = 40,
-    guidance_scale: float = 4.0,
-) -> Optional[str]:
-    """调用 Fal.ai fal-ai/flux-pro 生成图片（比 flux-dev 品质更高）。"""
-    if not FAL_KEY:
-        print("[image:flux-pro] FAL_KEY 未设置")
-        return None
-
-    url = "https://fal.run/fal-ai/flux-pro"
-    headers = {
-        "Authorization": f"Key {FAL_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    original_w, original_h = width, height
-    width = (width // 8) * 8
-    height = (height // 8) * 8
-    if (width, height) != (original_w, original_h):
-        print(f"[image:flux-pro] 尺寸对齐 8 倍数: {original_w}x{original_h} → {width}x{height}")
-
-    payload = {
-        "prompt": prompt,
-        "image_size": {"width": width, "height": height},
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
-        "sync_mode": True,
-    }
-
-    total_pixels = width * height
-    print(
-        f"[image:flux-pro] 请求 fal-ai/flux-pro, "
-        f"size={width}x{height} ({total_pixels / 1e6:.1f}MP), "
-        f"steps={num_inference_steps}, guidance={guidance_scale}, "
-        f"prompt_len={len(prompt)}"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            images = data.get("images", [])
-            if images and len(images) > 0:
-                img = images[0]
-                img_url = img.get("url", "")
-
-                if img_url.startswith("data:"):
-                    b64 = img_url.split(",", 1)[1] if "," in img_url else img_url
-                    print(f"[image:flux-pro] 生图成功 (data URI), base64_len={len(b64)}")
-                    return b64
-                elif img_url.startswith("http"):
-                    print(f"[image:flux-pro] 生图成功, 从 URL 下载: {img_url[:80]}...")
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl:
-                        img_resp = await dl.get(img_url)
-                        if img_resp.status_code == 200:
-                            b64 = base64.b64encode(img_resp.content).decode("utf-8")
-                            print(f"[image:flux-pro] 下载完成, base64_len={len(b64)}")
-                            return b64
-                else:
-                    print(f"[image:flux-pro] 未知 URL 格式: {img_url[:100]}")
-                    return None
-            print(f"[image:flux-pro] 返回数据无 images: {json.dumps(data, ensure_ascii=False)[:300]}")
-            return None
-        else:
-            err = resp.text[:500]
-            print(f"[image:flux-pro] API 错误 {resp.status_code}: {err}")
-            return None
-
-    except httpx.TimeoutException:
-        print("[image:flux-pro] 请求超时 (300s)")
-        return None
-    except Exception as e:
-        print(f"[image:flux-pro] 异常: {type(e).__name__}: {e}")
-        return None
-
 
 # ============== 通道 A：Fal.ai gpt-image-2（主力）==============
 
@@ -1364,54 +998,6 @@ async def _generate_fal(
 
 # ============== 通道 B：可灵（备）==============
 
-async def _generate_keling(prompt: str, size: str = "1080x1920") -> Optional[str]:
-    """调用快手可灵 API 生成图片（兜底通道）。"""
-    if not KELING_API_KEY:
-        print("[image:keling] KELING_API_KEY 未设置，跳过")
-        return None
-
-    url = f"{KELING_BASE_URL}/images/generations"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {KELING_API_KEY}",
-    }
-
-    payload = {
-        "model": KELING_IMAGE_MODEL,
-        "prompt": prompt,
-        "n": 1,
-        "size": size,
-    }
-
-    print(f"[image:keling] 尝试可灵 API")
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            images = data.get("data", [])
-            if images and len(images) > 0:
-                b64 = images[0].get("b64_json", "") or images[0].get("image_base64", "")
-                if b64:
-                    return b64
-                url_val = images[0].get("url", "")
-                if url_val:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as dl:
-                        img_resp = await dl.get(url_val)
-                        if img_resp.status_code == 200:
-                            return base64.b64encode(img_resp.content).decode("utf-8")
-            return None
-        else:
-            print(f"[image:keling] API 错误 {resp.status_code}: {resp.text[:300]}")
-            return None
-
-    except Exception as e:
-        print(f"[image:keling] 异常: {type(e).__name__}: {e}")
-        return None
-
-
 # ============== 视觉档案合法性校验 ==============
 
 def _is_valid_visual_profile(text: str) -> bool:
@@ -1494,7 +1080,7 @@ async def generate_all_images(
     5. 异常兜底：单张失败不阻塞后续 → 降敏 → LLM 改写 → 通用 prompt → 占位图
 
     v8 vs v7: visual_subject 不再总是主角，配角/环境/物品都有独立镜头。
-    降级链: storyboard → visual_plan (v7) → template (v5).
+    screenplay / storyboard 任一失败 → 中止生图，不浪费 API 费用。
     Returns:
         {"total_segments": N, "total_images": N, "success": N, "failed": N}
     """
@@ -1600,36 +1186,24 @@ async def generate_all_images(
             total_segments=total_segments,
         )
         if storyboard:
-            # 把 face_policy 和 character_cast 注入 storyboard（供 build_single_segment_prompt 使用）
             storyboard["face_policy"] = screenplay.get("face_policy", "show")
             storyboard["character_cast"] = screenplay.get("character_cast", [])
             shot_count = len(storyboard.get("shots", []))
             print(f"[image:v8] 分镜脚本成功: {shot_count} 镜")
         else:
-            print("[image:v8] 分镜脚本失败，降级为旧版 visual_plan 模式")
-            # 降级：回退到旧版 plan_visual_arc
-            storyboard = None
+            msg = "[image:v8] 分镜脚本生成失败，已中止生图，避免浪费 API 费用。请检查日志后重试。"
+            print(msg)
+            return {"error": msg}
     else:
-        print("[image:v8] 剧本生成失败，降级为逐段模板模式")
+        msg = "[image:v8] 剧本生成失败，已中止生图，避免浪费 API 费用。请检查日志后重试。"
+        print(msg)
+        return {"error": msg}
 
-    # ── v7 兼容降级：screenplay 失败时回退到旧版 plan_visual_arc ──
+    # v8 storyboard 已就绪，直接进入生图阶段
+    # （storyboard 失败已在上方 return error，不会执行到这里）
     visual_plan = None
-    if not screenplay and not storyboard:
-        print(f"[image:v5] v8 剧本失败 → 降级为旧版 plan_visual_arc...")
-        visual_plan = await plan_visual_arc(
-            rewritten_transcript=rewritten,
-            book_title=book_title,
-            book_author=book_author,
-            visual_context=visual_context,
-            style=style,
-            total_segments=total_segments,
-            sentences=sentences,
-            gender=gender,
-        )
-        if visual_plan:
-            print(f"[image:v5] 视觉规划成功: {len(visual_plan.get('scenes', []))} 个分镜方案")
-        else:
-            print("[image:v5] 视觉规划失败，降级为逐段模板模式")
+    shot_count = len(storyboard.get("shots", [])) if storyboard else 0
+    print(f"[image:v8] 分镜就绪: {shot_count} 镜 → 开始生图")
 
     # 3. 根据画幅比确定请求尺寸与目标尺寸
     if aspect_ratio == "16:9":
@@ -1689,7 +1263,7 @@ async def generate_all_images(
                 actual_style_bible = style_bible
                 actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
-            # 构建 Prompt（v8：优先 storyboard, v7 兼容 visual_plan）
+            # 构建 Prompt（v8 storyboard）
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -1702,17 +1276,18 @@ async def generate_all_images(
                 visual_plan=visual_plan,
                 storyboard=storyboard,
             )
-            if storyboard or visual_plan:
-                final_prompt = base_prompt  # v8/v7: 已包含所有风格元素
-            else:
-                final_prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
+            if not base_prompt:
+                # 分镜数据不完整 → 跳过此段，不调用任何 API
+                print(f"[image:v4] 段 {seg_idx + 1} prompt 为空 → 跳过, 不消耗API")
+                return {"seg_idx": seg_idx, "status": "skipped_no_data", "target_path": target_path}
+            final_prompt = base_prompt  # v8: 已包含所有风格元素
 
             # 保存 prompt 到文件
             prompt_path = os.path.join(images_dir, f"seg_{seg_idx:03d}_prompt.txt")
             with open(prompt_path, "w", encoding="utf-8") as f:
                 f.write(final_prompt)
 
-            # 多通道生图（fal → sanitized → generic → keling → sanitized keling）
+            # Fal.ai 生图（仅一次降敏重试，不跨平台、不降级质量、不浪费其他API）
             img_bytes = None
             error_msg = ""
             try:
@@ -1720,7 +1295,7 @@ async def generate_all_images(
                 if b64:
                     img_bytes = base64.b64decode(b64)
                 else:
-                    # fal 失败 → 降敏重试
+                    # 降敏重试（同平台、同模型、仅 prompt 微调）
                     sanitized = _sanitize_prompt(final_prompt)
                     if sanitized != final_prompt:
                         print(f"[image:v4] 段 {seg_idx + 1} fal 首次失败 → 降敏重试")
@@ -1728,78 +1303,8 @@ async def generate_all_images(
                         if b64:
                             img_bytes = base64.b64decode(b64)
                             final_prompt = sanitized
-
-                    # sanitized 也失败 → LLM 语义安全改写（保留同场景同情绪，去掉触发审查的具象描写）
-                    generic = None
                     if not img_bytes:
-                        print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → LLM 安全改写")
-                        safe_sentence = await _llm_sanitize_segment(
-                            sentence=sentence,
-                            book_title=book_title,
-                            book_author=book_author,
-                            segment_index=seg_idx,
-                            total_segments=total_segments,
-                            visual_context=visual_context,
-                        )
-                        if safe_sentence != sentence:
-                            # 用 LLM 改写后的句子重建 prompt
-                            llm_base = build_single_segment_prompt(
-                                text=safe_sentence,
-                                book_title=book_title,
-                                book_author=book_author,
-                                segment_index=seg_idx,
-                                total_segments=total_segments,
-                                style_bible=actual_style_bible,
-                                aspect_ratio=aspect_ratio,
-                                visual_context=visual_context,
-                                visual_plan=visual_plan,
-                                storyboard=storyboard,
-                            )
-                            llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
-                            print(f"[image:v4] 段 {seg_idx + 1} LLM 改写完成 → 重试 Fal.ai")
-                            b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
-                            if b64:
-                                img_bytes = base64.b64decode(b64)
-                                final_prompt = llm_prompt
-                                print(f"[image:v4] 段 {seg_idx + 1} LLM 改写后生图成功")
-
-                    # LLM 改写也失败 → 通用 prompt 兜底
-                    if not img_bytes:
-                        generic = _build_generic_prompt(
-                            book_title=book_title, book_author=book_author,
-                            segment_index=seg_idx, total_segments=total_segments,
-                            style_bible=actual_style_bible, aspect_ratio=aspect_ratio,
-                            visual_context=visual_context,
-                        )
-                        generic += actual_style_suffix + SAFETY_SUFFIX
-                        print(f"[image:v4] 段 {seg_idx + 1} 降敏仍失败 → 通用 prompt 兜底")
-                        b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
-                        if b64:
-                            img_bytes = base64.b64decode(b64)
-                            final_prompt = generic
-
-                    if not img_bytes:
-                        # fal 全部失败 → 可灵
-                        keling_size = f"{TARGET_W}x{TARGET_H}"
-                        b64 = await _generate_keling(final_prompt, size=keling_size)
-                        if b64:
-                            img_bytes = base64.b64decode(b64)
-                        elif sanitized != final_prompt:
-                            b64 = await _generate_keling(sanitized, size=keling_size)
-                            if b64:
-                                img_bytes = base64.b64decode(b64)
-                                final_prompt = sanitized
-                            elif generic is not None:
-                                b64 = await _generate_keling(generic, size=keling_size)
-                                if b64:
-                                    img_bytes = base64.b64decode(b64)
-                                    final_prompt = generic
-                                else:
-                                    error_msg = "所有生图通道均失败"
-                            else:
-                                error_msg = "所有生图通道均失败"
-                        else:
-                            error_msg = "所有生图通道均失败"
+                        error_msg = "Fal.ai 生图失败（含降敏重试），已中止（不跨平台）"
             except Exception as e:
                 error_msg = f"生图异常: {type(e).__name__}: {e}"
                 print(f"[image:v4] 段 {seg_idx + 1} 异常: {error_msg}")
@@ -1948,9 +1453,11 @@ async def regenerate_single_image(
     book_title: str = "",
     book_author: str = "",
     aspect_ratio: str = "9:16",
+    custom_prompt: str | None = None,
 ) -> dict:
     """
-    v4 单段配图重跑：单张独立生图（高精直出，不走九宫格）。
+    v4 单段配图重跑：单张独立生图。
+    如果 custom_prompt 非空，直接用自定义 prompt，跳过自动构建。
     """
     from models import TaskImage, Task
     from services.llm_service import split_into_short_sentences
@@ -2003,86 +1510,30 @@ async def regenerate_single_image(
         actual_style_bible = style_bible
         actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
-    # 构建 Prompt + 视觉档案 + 风格后缀 + 安全补丁
-    base_prompt = build_single_segment_prompt(
-        text=text,
-        book_title=book_title,
-        book_author=book_author,
-        segment_index=segment_index,
-        total_segments=len(sentences),
-        style_bible=actual_style_bible,
-        aspect_ratio=aspect_ratio,
-        visual_context=visual_context,
-        # regenerate: no screenplay/storyboard — fall through to template mode
-    )
-    prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
-
-    print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
+    # 用户自定义 prompt 优先，否则自动构建简单 prompt
+    if custom_prompt and custom_prompt.strip():
+        prompt = custom_prompt.strip() + " " + actual_style_suffix + " " + SAFETY_SUFFIX
+        print(f"[image:single] 使用自定义 prompt task={task_id} sent={segment_index}, len={len(prompt)}")
+    else:
+        aspect_hint = "8:9 near-square vertical composition" if aspect_ratio == "8:9" else f"{aspect_ratio} vertical"
+        base_prompt = (
+            f"A cinematic vertical composition, {aspect_hint}. "
+            f"Scene inspired by: {text.strip()}. "
+            f"single image, no text, no watermark"
+        )
+        prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
+        print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
 
     b64 = await _generate_fal(prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
     if not b64:
-        # fal 失败 → 降敏重试
+        # 降敏重试（同平台、仅 prompt 微调）
         sanitized = _sanitize_prompt(prompt)
         if sanitized != prompt:
             print(f"[image:single] fal 首次失败 → 降敏重试")
             b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
             if b64:
                 prompt = sanitized
-        # sanitized 也失败 → LLM 语义安全改写（保留同场景同情绪）
-        generic = None
-        if not b64:
-            print(f"[image:single] 降敏仍失败 → LLM 安全改写")
-            safe_text = await _llm_sanitize_segment(
-                sentence=text,
-                book_title=book_title,
-                book_author=book_author,
-                segment_index=segment_index,
-                total_segments=len(sentences),
-                visual_context=visual_context,
-            )
-            if safe_text != text:
-                llm_base = build_single_segment_prompt(
-                    text=safe_text,
-                    book_title=book_title,
-                    book_author=book_author,
-                    segment_index=segment_index,
-                    total_segments=len(sentences),
-                    style_bible=actual_style_bible,
-                    aspect_ratio=aspect_ratio,
-                    visual_context=visual_context,
-                )
-                llm_prompt = llm_base + actual_style_suffix + SAFETY_SUFFIX
-                print(f"[image:single] LLM 改写完成 → 重试 Fal.ai")
-                b64 = await _generate_fal(llm_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
-                if b64:
-                    prompt = llm_prompt
-                    print(f"[image:single] LLM 改写后生图成功")
-
-        # LLM 改写也失败 → 通用 prompt 兜底（完全去掉原文避免上下文级审查）
-        if not b64:
-            generic = _build_generic_prompt(
-                book_title=book_title, book_author=book_author,
-                segment_index=segment_index, total_segments=len(sentences),
-                style_bible=actual_style_bible, aspect_ratio=aspect_ratio,
-                visual_context=visual_context,
-            )
-            generic += actual_style_suffix + SAFETY_SUFFIX
-            print(f"[image:single] 降敏仍失败 → 通用 prompt 兜底")
-            b64 = await _generate_fal(generic, width=REQUEST_W, height=REQUEST_H, quality=quality)
-            if b64:
-                prompt = generic
-        if not b64:
-            # 尝试可灵
-            keling_size = f"{TARGET_W}x{TARGET_H}"
-            b64 = await _generate_keling(prompt, size=keling_size)
-            if not b64 and sanitized != prompt:
-                b64 = await _generate_keling(sanitized, size=keling_size)
-                if b64:
-                    prompt = sanitized
-                elif generic is not None:
-                    b64 = await _generate_keling(generic, size=keling_size)
-                    if b64:
-                        prompt = generic
+        # 仍失败 → 放弃，不跨平台、不降级质量
     img_bytes = base64.b64decode(b64) if b64 else None
 
     target_path = os.path.join(images_dir, f"seg_{segment_index:03d}.png")

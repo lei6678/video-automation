@@ -147,6 +147,9 @@ function App() {
 
   const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null)  // 当前大图预览的段号
   const [isRegeneratingImage, setIsRegeneratingImage] = useState<number | null>(null)  // 正在单段重跑的段号
+  const [editingPromptIdx, setEditingPromptIdx] = useState<number | null>(null)  // 正在编辑 prompt 的段号
+  const [editingPromptText, setEditingPromptText] = useState('')  // 编辑中的 prompt 文本
+  const [loadedPromptIdx, setLoadedPromptIdx] = useState<number | null>(null)  // 已加载 prompt 的段号
   const [imageSummary, setImageSummary] = useState<{total: number; success: number; failed: number; generating: boolean; complete: boolean} | null>(null)  // v9: 后端权威配图进度
   const [, setImageTotalExpected] = useState(0)  // 预期总张数（仅 setter）
   const [forceRegen, setForceRegen] = useState(false)  // 强制重跑：忽略已有图片+视觉档案缓存
@@ -529,15 +532,17 @@ function App() {
     }
   }
 
-  const handleRegenerateSegmentImage = async (segmentIndex: number) => {
+  const handleRegenerateSegmentImage = async (segmentIndex: number, customPrompt?: string) => {
     if (!taskId) return
     setIsRegeneratingImage(segmentIndex)
     setImageMessage('')
     try {
+      const body: any = { task_id: taskId, segment_index: segmentIndex, style: selectedImageStyle, aspect_ratio: selectedAspectRatio }
+      if (customPrompt) body.custom_prompt = customPrompt
       const resp = await fetch(`${API_BASE}/api/images/regenerate-segment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: taskId, segment_index: segmentIndex, style: selectedImageStyle, aspect_ratio: selectedAspectRatio }),
+        body: JSON.stringify(body),
       })
       const data = await resp.json()
       await refreshImages()
@@ -547,6 +552,19 @@ function App() {
       setImageMessage('单段配图重跑失败，请检查后端日志')
     } finally {
       setIsRegeneratingImage(null)
+    }
+  }
+
+  // 加载某段配图的 prompt 文本
+  const fetchPromptForSegment = async (segmentIndex: number) => {
+    if (!taskId || loadedPromptIdx === segmentIndex) return
+    try {
+      const resp = await fetch(`${API_BASE}/api/images/prompt/${taskId}/${segmentIndex}`)
+      const data = await resp.json()
+      setEditingPromptText(data.prompt || '')
+      setLoadedPromptIdx(segmentIndex)
+    } catch (e) {
+      console.error('加载 prompt 失败:', e)
     }
   }
 
@@ -735,6 +753,14 @@ function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [images, selectedImageIndex])
+
+  // 选中配图时自动加载 prompt
+  useEffect(() => {
+    if (selectedImageIndex !== null && taskId) {
+      setLoadedPromptIdx(null)  // 触发重新加载
+      setEditingPromptIdx(null)  // 关闭编辑状态
+    }
+  }, [selectedImageIndex, taskId])
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -1361,6 +1387,8 @@ function App() {
                   className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                 >
                   <option value="default">默认电影感</option>
+                  <option value="warm_docu">温暖纪实风</option>
+                  <option value="wong_kar_wai">王家卫电影感</option>
                   <option value="warm_book">温暖治愈书单</option>
                   <option value="clean_health">明亮健康生活</option>
                   <option value="philosophy">哲学思辨风</option>
@@ -1433,6 +1461,12 @@ function App() {
               )}
               {selectedImageStyle === 'philosophy' && (
                 <span>💡 画面调性：偏向暗沉深邃的色调、阴影感强烈、带有一点艺术史诗的孤独与深思氛围。 | 🎯 推荐赛道：深度人生感悟、中年危机破局、商业认知觉醒、高端思维模型。</span>
+              )}
+              {selectedImageStyle === 'warm_docu' && (
+                <span>💡 画面调性：全程统一暖调、自然柔光、杂志纪实摄影质感，不跳色温，真实接地气。 | 🎯 推荐赛道：人物传记、真实故事、情感纪实、生活记录。</span>
+              )}
+              {selectedImageStyle === 'wong_kar_wai' && (
+                <span>💡 画面调性：霓虹湿街、慢门抽帧、高饱和红绿色调、85mm浅景深、怀旧抽帧感。 | 🎯 推荐赛道：文艺短片、情感独白、都市故事、复古氛围感。</span>
               )}
             </div>
 
@@ -1700,6 +1734,53 @@ function App() {
                           {selectedImg.error_msg && (
                             <p className="text-xs text-red-400 mt-1 max-w-sm">{selectedImg.error_msg}</p>
                           )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Prompt 编辑区（像音频文本编辑一样） */}
+                    <div className="px-4 py-3 bg-gray-800 border-t border-gray-700">
+                      {editingPromptIdx !== segIdx ? (
+                        <div
+                          className="cursor-pointer hover:bg-gray-700/50 rounded-lg p-2 transition-colors"
+                          onClick={() => {
+                            fetchPromptForSegment(segIdx)
+                            setEditingPromptIdx(segIdx)
+                          }}
+                        >
+                          <p className="text-xs text-gray-400 mb-1">📝 生图 Prompt（点击编辑）</p>
+                          <p className="text-xs text-gray-300 leading-relaxed line-clamp-3" style={{ fontSize: '11px', lineHeight: '1.6' }}>
+                            {loadedPromptIdx === segIdx && editingPromptText ? editingPromptText : '点击加载 prompt 文本...'}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-xs text-gray-400">📝 编辑 Prompt（修改后点「确认重跑」）</p>
+                          <textarea
+                            value={editingPromptText}
+                            onChange={(e) => setEditingPromptText(e.target.value)}
+                            rows={5}
+                            className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-xs text-gray-200 resize-none focus:outline-none focus:ring-2 focus:ring-amber-400 font-mono"
+                            style={{ fontSize: '11px', lineHeight: '1.5' }}
+                          />
+                          <div className="flex gap-2 justify-end">
+                            <button
+                              onClick={() => setEditingPromptIdx(null)}
+                              className="px-3 py-1 text-xs text-gray-300 bg-gray-700 border border-gray-600 rounded-lg hover:bg-gray-600 transition-colors"
+                            >
+                              取消
+                            </button>
+                            <button
+                              onClick={() => {
+                                handleRegenerateSegmentImage(segIdx, editingPromptText)
+                                setEditingPromptIdx(null)
+                              }}
+                              disabled={isRegenning || isImageLoading}
+                              className="flex items-center gap-1 px-3 py-1 text-xs bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:bg-amber-400/50 transition-colors"
+                            >
+                              {isRegenning ? '⏳ 生成中...' : '🔄 确认重跑'}
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
