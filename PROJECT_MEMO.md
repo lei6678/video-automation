@@ -1,5 +1,24 @@
 # 项目备忘录
 
+## 2026-07-30（续）style_bible死参数修复 + 审核拒绝预备方案 + 启动窗口修复
+
+### style_bible 死参数修复 ✅
+
+删掉全局 STYLE_LOCK 后暴露：`build_single_segment_prompt` 接收 `style_bible` 参数但函数体内从未使用。6 个风格选了都出同样的图。已在 prompt 拼接中补上 `Style: {style_bible}`。
+
+### Fal.ai 审核拒绝 — 三级预备方案 ✅
+
+分镜 prompt 被 Fal.ai 审核拒绝 → 降敏重试 → 仍失败 → **新增第三级：简洁 prompt（原句文本+风格后缀）**。
+不换平台、不加钱、只换 prompt 策略。只有最终成功才扣 $0.01。
+
+### 启动黑窗口修复 ✅
+
+- `reload=True` → `reload=False`（子进程阻断 print 输出）
+- `line_buffering=True`（每行立即刷新）
+- LAN IP PowerShell 语法修复（`.match()` → `-match`）
+
+---
+
 ## 2026-07-29 一周复盘 + 分享文档 + 微调收尾
 
 ### v8 分镜架构全线完工 ✅

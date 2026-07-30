@@ -2266,11 +2266,11 @@ def _detect_lan_ip() -> str:
     try:
         out = subprocess.check_output(
             ["powershell", "-NoProfile", "-Command",
-             # 取 IPv4，排除回环和虚拟适配器 → 按 PhysicalAdapter 优先 → 取 IP
+             # 取 IPv4，排除回环和虚拟适配器 → 优先 WiFi → 取 IP
              "(Get-NetIPAddress -AddressFamily IPv4 "
              "-InterfaceAlias 'WLAN','Wi-Fi','Ethernet','以太网','WLAN*','Wi-Fi*','以太网*' "
              "-PolicyStore ActiveStore -ErrorAction SilentlyContinue "
-             "| Sort-Object -Property { -not $_.InterfaceAlias.match('WLAN|Wi-Fi') } "
+             "| Sort-Object -Property { if ($_.InterfaceAlias -match 'WLAN|Wi-Fi') { 0 } else { 1 } } "
              "| Select-Object -First 1).IPAddress"],
             timeout=5, encoding="utf-8", errors="replace")
         ip = out.strip()
@@ -2315,6 +2315,9 @@ if __name__ == "__main__":
     import uvicorn
     import sys as _sys
 
+    # 无缓冲输出：确保 print 在 bat 黑窗口里实时可见
+    _sys.stdout.reconfigure(line_buffering=True) if hasattr(_sys.stdout, 'reconfigure') else None
+
     print("=" * 56)
     print("  Video Automation Server")
     print("=" * 56)
@@ -2335,4 +2338,5 @@ if __name__ == "__main__":
     if _frozen:
         uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
     else:
-        uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+        # reload=True 开子进程会阻断 print 输出；黑窗口环境用 reload=False
+        uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

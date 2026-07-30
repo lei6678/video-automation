@@ -1304,7 +1304,21 @@ async def generate_all_images(
                             img_bytes = base64.b64decode(b64)
                             final_prompt = sanitized
                     if not img_bytes:
-                        error_msg = "Fal.ai 生图失败（含降敏重试），已中止（不跨平台）"
+                        # 预备方案：降级到简洁 prompt（原句文本 + 风格后缀），绕过审核敏感词
+                        fallback_prompt = (
+                            f"A cinematic vertical composition, 8:9 near-square vertical composition. "
+                            f"Scene inspired by: {sentence.strip()}. "
+                        ) + actual_style_suffix + " " + SAFETY_SUFFIX
+                        print(f"[image:v4] 段 {seg_idx + 1} 降敏重试也失败 → 尝试简洁 prompt 备选")
+                        b64 = await _generate_fal(fallback_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
+                        if b64:
+                            img_bytes = base64.b64decode(b64)
+                            final_prompt = fallback_prompt
+                            # 也更新保存的 prompt 文件
+                            with open(prompt_path, "w", encoding="utf-8") as f:
+                                f.write(final_prompt)
+                        else:
+                            error_msg = "Fal.ai 生图失败（含降敏重试 + 简洁prompt备选），已中止（不跨平台）"
             except Exception as e:
                 error_msg = f"生图异常: {type(e).__name__}: {e}"
                 print(f"[image:v4] 段 {seg_idx + 1} 异常: {error_msg}")
