@@ -1,5 +1,56 @@
 # 项目备忘录
 
+## 2026-07-31 中国纪实风格 + LLM模型升级 + 对标分析
+
+### LLM 全链路升级 ✅
+
+将所有 LLM 调用从 `deepseek-chat` / `deepseek-v4-flash` 统一升级到 `deepseek-v4-pro`：
+- `image_service.py`: `plan_visual_arc`、`generate_screenplay`、`generate_storyboard` 三处模型+超时+max_tokens 升级
+- `llm_service.py`: `clean_asr_text`、`extract_visual_context`、`rewrite_script`(双pass) 四处模型升级
+- `generate_screenplay`/`generate_storyboard`: max_tokens 16384→32768, timeout 60s→180s
+
+### 中国本土纪实风格（chinese_docu）新增 ✅
+
+`image_service.py` 新增：
+- `STYLE_BIBLES["chinese_docu"]` — 中国纪实摄影风格描述
+- `STYLE_PROMPT_MAP["chinese_docu"]` — 风格后缀
+- `STYLE_PREFIX` 字典 — 根据风格选 prompt 开头（documentary/cinematic/lifestyle）
+- `_parse_visual_context_fallback()` — 当 screenplay 角色表为空时从 visual_context 兜底解析，兼容 4 种格式变体（正则链）
+
+前端 `App.tsx` 新增 `🇨🇳 中国本土纪实` 选项。
+
+### generate_screenplay 角色表修复 ✅
+
+prompt 加 CRITICAL 约束：`character_cast MUST NOT be empty if the story contains ANY human characters`，修复 Pro 模型出 30 个场景但 character_cast=[] 的问题。
+
+### 两版生图对比测试
+
+| 版本 | 策略 | 目录 |
+|------|------|------|
+| 旧版 | 负面禁令（no CGI/3D/plastic skin...） | `D:\chinese_docu_test\` |
+| 新版 | Gemini正向术语（Kodak Portra+35mm+Magnum） | `D:\gemini_style_test\` |
+
+### 🔴 对标分析结论（本次核心发现）
+
+对标视频截图（桌面 对标1-3）vs 我们生成图的像素级对比：
+
+| 维度 | 对标均值 | 我们均值 | 问题 |
+|------|---------|---------|------|
+| 亮度 | ~122 | ~81 | 暗 34% |
+| 亮部占比 | 21% | 5.5% | 对标 4 倍高光 |
+| 冷色占比 | 19% | 6.4% | 对标 3 倍冷色 |
+| 暖色占比 | 66% | 83% | 过暖 |
+
+**根因**：Kodak Portra 400 是暖调胶片，把画面推向复古暖色，刚好走向纪实摄影的反面。无论负面禁令还是胶片术语都没抓到纪实摄影的本质——自然白平衡+合理曝光+无滤镜感。
+
+**修正方向**：去掉暖调胶片锚点 → 中性白平衡 → 加强曝光指令（well-exposed, natural daylight color temperature, realistic highlights）。
+
+### 明天计划
+
+修正 chinese_docu 的 STYLE 三件套（BIBLE/PREFIX/SUFFIX），换中性色温+曝光指令，跑第三版对比测试。
+
+---
+
 ## 2026-07-30（续）style_bible死参数修复 + 审核拒绝预备方案 + 启动窗口修复
 
 ### style_bible 死参数修复 ✅

@@ -1387,6 +1387,7 @@ function App() {
                   className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                 >
                   <option value="default">默认电影感</option>
+                  <option value="chinese_docu">🇨🇳 中国本土纪实</option>
                   <option value="warm_docu">温暖纪实风</option>
                   <option value="wong_kar_wai">王家卫电影感</option>
                   <option value="warm_book">温暖治愈书单</option>

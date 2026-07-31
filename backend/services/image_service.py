@@ -85,6 +85,14 @@ STYLE_BIBLES = {
         "warm browns + muted amber + soft cream, natural textures, "
         "medium format film look, honest and grounded aesthetic"
     ),
+    "chinese_docu": (
+        "Chinese documentary realism, natural available light, candid unposed photography, "
+        "no beauty filters, no CGI, no 3D render, no plastic skin. "
+        "Real people in authentic moments, natural skin texture with subtle imperfections. "
+        "Weathered lived-in Chinese environments: concrete walls, wooden furniture, faded fabrics. "
+        "Muted earth tones, faded indigo blue, soft olive green. "
+        "Handheld documentary feel, photojournalism aesthetic, slight photochemical grain."
+    ),
 }
 
 # ============== 风格后缀（v5：英文视觉修饰词，注入 Fal.ai prompt）==============
@@ -121,6 +129,11 @@ STYLE_PROMPT_MAP = {
         "soft daylight, gentle shadows, documentary photography style, "
         "editorial composition, authentic unposed feel, "
         "medium format film, honest and grounded aesthetic"
+    ),
+    "chinese_docu": (
+        ", Chinese documentary realism, natural available light, candid photography, "
+        "natural skin texture, no CGI, no 3D render, muted earth tones, "
+        "photojournalism aesthetic, handheld documentary feel"
     ),
 }
 
@@ -273,7 +286,7 @@ async def plan_visual_arc(
             resp = await http.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-v4-pro",
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -379,7 +392,11 @@ async def generate_screenplay(
         "- role: 'protagonist' | 'supporting' | 'minor'\n"
         "IMPORTANT: extract characters from BOTH the provided CHARACTER PROFILES and the story text. "
         "If the character profiles already describe someone, use those details faithfully. "
-        "If the story mentions a character NOT in the profiles, create a profile from text clues + reasonable inference.\n\n"
+        "If the story mentions a character NOT in the profiles, create a profile from text clues + reasonable inference.\n"
+        "CRITICAL: character_cast MUST NOT be empty if the story contains ANY human characters. "
+        "An empty array `[]` is NEVER correct for stories about real people. "
+        "If characters_present in scenes references a name, that name MUST have a cast entry. "
+        "Every named person in the story = one cast entry. No exceptions.\n\n"
         "=== SCENES ===\n"
         "For each of the {total} segments, describe:\n"
         "- emotion: one of [glory, tragedy, transition, daily]\n"
@@ -396,6 +413,7 @@ async def generate_screenplay(
         "4. daily (learning, ordinary life): soft natural light, diffuse, neutral palette\n\n"
         "SAFETY: no deathbeds, no graves, no blood, no crying faces. "
         "Use poetic distance: an empty chair, light through a window, a silhouette.\n"
+        "REMINDER: character_cast array must not be empty. Minimum 1 entry for any story with human subjects. "
         "Output pure JSON, no markdown."
     ).replace("{total}", str(total_segments))
 
@@ -430,17 +448,17 @@ async def generate_screenplay(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as http:
             resp = await http.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-v4-pro",
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 16384,
+                    "max_tokens": 32768,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -576,17 +594,17 @@ async def generate_storyboard(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as http:
             resp = await http.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-v4-pro",
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 16384,
+                    "max_tokens": 32768,
                     "response_format": {"type": "json_object"},
                 },
                 headers={
@@ -807,6 +825,20 @@ def _detect_sentence_mood(
 # ============== 单图直生 Prompt（v4：单句独立生图，彻底废弃九宫格）==============
 
 
+# ============== 风格前缀（根据风格类型选择 prompt 开头，纪实=documentary / 电影=cinematic）==============
+
+STYLE_PREFIX = {
+    "chinese_docu": "A documentary photograph",
+    "documentary_realism": "A neorealist photograph",
+    "warm_docu": "A documentary photograph",
+    "default": "A cinematic photograph",
+    "wong_kar_wai": "A cinematic film still",
+    "warm_book": "A cinematic photograph",
+    "clean_health": "A lifestyle photograph",
+    "philosophy": "A contemplative photograph",
+}
+
+
 def build_single_segment_prompt(
     text: str,
     book_title: str = "",
@@ -814,6 +846,7 @@ def build_single_segment_prompt(
     segment_index: int = 0,
     total_segments: int = 1,
     style_bible: str = "",
+    style_key: str = "default",
     aspect_ratio: str = "9:16",
     visual_context: str = "",
     visual_plan: Optional[dict] = None,
@@ -881,8 +914,9 @@ def build_single_segment_prompt(
         "detail": "extreme close-up detail shot, no face, texture focus",
     }.get(shot_type, "medium shot")
 
+    prompt_prefix = STYLE_PREFIX.get(style_key, STYLE_PREFIX["default"])
     prompt = (
-        f"A cinematic photograph, 8:9 vertical, {shot_hint}. "
+        f"{prompt_prefix}, 8:9 vertical, {shot_hint}. "
         f"Subject: {visual_subject}. "
         f"Scene: {composition}. "
         f"Lighting: {emotion_light}. "
@@ -1054,6 +1088,96 @@ def _is_valid_visual_profile(text: str) -> bool:
     return True
 
 
+def _parse_visual_context_fallback(visual_context: str) -> list[dict]:
+    """
+    当 screenplay 返回空 character_cast 时，从 visual_context 解析角色档案作为兜底。
+    兼容两种格式：
+      F1（deepseek-chat 旧格式）：
+        角色1：邱傲玉|女|18岁|中等偏瘦|齐耳短发|五官清秀，眉眼坚定|白色T恤/运动校服|无
+      F2（deepseek-v4-pro 可能变体）：
+        **角色1**：邱傲玉|女|18岁|...   （markdown bold）
+        - 角色1：邱傲玉|女|18岁|...      （bullet list）
+        1. 角色1：邱傲玉|女|18岁|...     （numbered list）
+    映射：姓名→name, 性别→gender, 年龄→age, 体型→body_type,
+         发型+面部→appearance, 服装→clothing
+    """
+    import re as _re
+    cast = []
+    seen_names = set()
+
+    # 多模式正则：逐行匹配 "角色N：..." 的各种变体
+    # 组1 = 名字后的整行 pipe 数据
+    patterns = [
+        # F1: 角色1：邱傲玉|女|18岁|...
+        _re.compile(r'^角色(\d+)[：:]\s*(.+)$'),
+        # F2a: **角色1**：邱傲玉|女|18岁|...
+        _re.compile(r'^\*\*角色(\d+)\*\*\s*[：:]\s*(.+)$'),
+        # F2b: - 角色1：邱傲玉|女|18岁|... 或 * 角色1：...
+        _re.compile(r'^[-*]\s*角色(\d+)\s*[：:]\s*(.+)$'),
+        # F2c: 1. 角色1：... 或 1) 角色1：...
+        _re.compile(r'^\d+[.)]\s*角色(\d+)\s*[：:]\s*(.+)$'),
+    ]
+
+    lines = visual_context.split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        matched_data = None
+        for pat in patterns:
+            m = pat.match(stripped)
+            if m:
+                matched_data = m.group(2)
+                break
+
+        if not matched_data:
+            continue
+
+        parts = [p.strip() for p in matched_data.split("|")]
+        if len(parts) < 5:
+            # 字段数不够 → 可能不是标准格式，跳过
+            continue
+
+        name = parts[0] if len(parts) > 0 else "?"
+        if name in seen_names:
+            continue  # 去重（如"年轻时/老年时"拆成两行，保留第一个）
+        seen_names.add(name)
+
+        gender_raw = parts[1] if len(parts) > 1 else ""
+        if "女" in gender_raw:
+            gender_en = "female"
+        elif "男" in gender_raw:
+            gender_en = "male"
+        else:
+            gender_en = "unknown"
+
+        age = parts[2] if len(parts) > 2 else "?"
+        body_type = parts[3] if len(parts) > 3 else ""
+        appearance = parts[4] if len(parts) > 4 else ""
+        clothing = parts[5] if len(parts) > 5 else ""
+        special = parts[6] if len(parts) > 6 else ""
+        if special and special != "无":
+            body_type = f"{body_type}, {special}" if body_type else special
+
+        cast.append({
+            "name": name,
+            "gender": gender_en,
+            "age": age,
+            "appearance": appearance,
+            "clothing": clothing,
+            "body_type": body_type,
+            "role": "protagonist" if len(cast) == 0 else "supporting",
+        })
+
+    if cast:
+        print(f"[image:fallback] 从 visual_context 解析到 {len(cast)} 个角色: "
+              f"{[c['name'] for c in cast]}")
+    else:
+        print(f"[image:fallback] visual_context 解析结果为 0（visual_context 前200字: {visual_context[:200]}）")
+    return cast
+
+
 # ============== 主入口：按句批量生图（v4 单图直生）==============
 
 async def generate_all_images(
@@ -1178,6 +1302,13 @@ async def generate_all_images(
     if screenplay:
         cast_count = len(screenplay.get("character_cast", []))
         scene_count = len(screenplay.get("scenes", []))
+        # 兜底：DeepSeek 偶尔丢角色表，从 visual_context 解析补上
+        if cast_count == 0 and visual_context.strip():
+            fallback_cast = _parse_visual_context_fallback(visual_context)
+            if fallback_cast:
+                screenplay["character_cast"] = fallback_cast
+                cast_count = len(fallback_cast)
+                print(f"[image:v8] 剧本角色表为空 → 已用 visual_context 兜底: {cast_count} 角色")
         print(f"[image:v8] 剧本生成成功: {cast_count} 角色, {scene_count} 场景 → 启动分镜脚本...")
         storyboard = await generate_storyboard(
             screenplay=screenplay,
@@ -1264,6 +1395,7 @@ async def generate_all_images(
                 actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
             # 构建 Prompt（v8 storyboard）
+            prompt_style_key = sentence_style if sentence_style != "default" else style
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -1271,6 +1403,7 @@ async def generate_all_images(
                 segment_index=seg_idx,
                 total_segments=total_segments,
                 style_bible=actual_style_bible,
+                style_key=prompt_style_key,
                 aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
                 visual_plan=visual_plan,
@@ -1530,8 +1663,9 @@ async def regenerate_single_image(
         print(f"[image:single] 使用自定义 prompt task={task_id} sent={segment_index}, len={len(prompt)}")
     else:
         aspect_hint = "8:9 near-square vertical composition" if aspect_ratio == "8:9" else f"{aspect_ratio} vertical"
+        prompt_prefix = STYLE_PREFIX.get(sentence_style if sentence_style != "default" else style, STYLE_PREFIX["default"])
         base_prompt = (
-            f"A cinematic vertical composition, {aspect_hint}. "
+            f"{prompt_prefix}, {aspect_hint}. "
             f"Scene inspired by: {text.strip()}. "
             f"single image, no text, no watermark"
         )

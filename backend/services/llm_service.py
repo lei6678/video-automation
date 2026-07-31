@@ -58,7 +58,7 @@ async def clean_asr_text(
         清洗后的文本
     """
     response = await client.chat.completions.create(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(transcript, keyword, title, author)}
@@ -111,7 +111,7 @@ async def extract_visual_context(rewritten_text: str) -> str:
     print(f"[llm_service] 提取视觉档案, 文案长度: {len(rewritten_text)} 字")
 
     response = await client.chat.completions.create(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         messages=[
             {"role": "system", "content": "你是一个视觉档案提取助手。从文案中提取主人公视觉特征并严格按指定格式输出。不回答、不确认、不解释，不输出空模板，只输出有实际内容的档案。"},
             {"role": "user", "content": user_prompt}
@@ -146,7 +146,7 @@ async def rewrite_script(task_id: int, cleaned_text: str, db: Session, mode: str
     research_prompt = research_template.replace("{cleaned_text}", cleaned_text)
 
     research_response = await client.chat.completions.create(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         messages=[
             {"role": "system", "content": "你是一个人物背景知识检索助手。你的唯一任务是从文本中识别主角，列出你预训练记忆中关于他们的所有已知信息。不要改写，不要评价，只输出事实。"},
             {"role": "user", "content": research_prompt}
@@ -165,7 +165,7 @@ async def rewrite_script(task_id: int, cleaned_text: str, db: Session, mode: str
     user_prompt = user_template.replace("{background_knowledge}", background_knowledge).replace("{cleaned_text}", cleaned_text)
 
     response = await client.chat.completions.create(
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
