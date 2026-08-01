@@ -86,12 +86,17 @@ STYLE_BIBLES = {
         "medium format film look, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        "Chinese documentary realism, natural available light, candid unposed photography, "
-        "no beauty filters, no CGI, no 3D render, no plastic skin. "
-        "Real people in authentic moments, natural skin texture with subtle imperfections. "
+        "Chinese documentary realism. Single natural light source with clear direction, "
+        "natural light falloff creating cool neutral shadows away from the light. "
+        "Well-exposed true highlights (window light, practical lamps, skin rim light), "
+        "deep neutral shadows with realistic dynamic range, no crushed blacks. "
+        "Neutral white balance, no color cast, no warm filter. "
+        "Shallow depth of field: sharp foreground subject against softly blurred background, "
+        "clear spatial separation and depth. "
+        "Real people in authentic unposed moments, natural skin texture. "
         "Weathered lived-in Chinese environments: concrete walls, wooden furniture, faded fabrics. "
-        "Muted earth tones, faded indigo blue, soft olive green. "
-        "Handheld documentary feel, photojournalism aesthetic, slight photochemical grain."
+        "Muted earth tones + faded indigo blue + soft olive green, balanced with cool shadow tones. "
+        "Handheld documentary feel, photojournalism composition with clear visual focal point."
     ),
 }
 
@@ -131,9 +136,9 @@ STYLE_PROMPT_MAP = {
         "medium format film, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        ", Chinese documentary realism, natural available light, candid photography, "
-        "natural skin texture, no CGI, no 3D render, muted earth tones, "
-        "photojournalism aesthetic, handheld documentary feel"
+        ", directional natural light, cool neutral shadows, well-exposed highlights, "
+        "realistic dynamic range, neutral white balance, shallow depth of field, "
+        "natural skin texture, photojournalism composition, documentary photography"
     ),
 }
 
@@ -163,8 +168,8 @@ EMOTION_LIGHTING = {
         "cinematic rim lighting, epic and nostalgic atmosphere"
     ),
     "daily": (
-        "Soft natural lighting, diffuse light, neutral color palette, "
-        "gentle shadows, documentary style"
+        "Soft directional natural light, subtle light falloff into cool shadows, "
+        "neutral color palette, gentle depth of field, natural documentary style"
     ),
 }
 

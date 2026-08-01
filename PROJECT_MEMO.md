@@ -1,5 +1,36 @@
 # 项目备忘录
 
+## 2026-08-01 中国纪实风 v3 prompt 修正 + 像素验证
+
+### v3 prompt 修正 ✅
+
+基于 7/31 对标分析结论，chinese_docu 风格三处 prompt 从"描述相机"转向"描述光线行为"：
+
+| 位置 | v1/v2（旧） | v3（新） |
+|------|------------|---------|
+| STYLE_BIBLES | 负面禁令（no CGI/3D...）+ 平光 | 方向性光源 + 冷阴影 + 真高光 + 景深分离 |
+| STYLE_PROMPT_MAP | 重复禁令 | directional light, cool shadows, highlights, dynamic range |
+| EMOTION_LIGHTING daily | diffuse light, gentle shadows | 方向性柔光 + 冷阴影过渡 + 景深 |
+
+核心变化：去掉所有负面禁令 → 单光源方向 → 冷中性阴影 → 中性白平衡 → 景深分离。
+
+### v3 像素验证结果
+
+跑完整链路（文案→视觉档案→剧本→分镜→生图×3），像素分析：
+
+**🟢 冷阴影生效**：v3_1 中部冷色 35.5%（标杆2 34.6%），下部冷色 78.1%（标杆2 47.1%）——方向性光源描述起作用了。
+**🟢 v3_3 达到 Classic depth**（亮天空 + 细节前景），Bot/Top 纹理比 4.61。
+
+**🔴 仍存问题**：
+- 画面整体偏暗（v3_2 下部 L=14 接近纯黑），"no crushed blacks"不够
+- 边缘密度 3-4 vs 标杆 7-12，纹理太平滑
+
+### 明天计划
+
+继续调 v4：加"well-lit exposure"提升整体亮度，加纹理描述（grain/texture/detail），抑制 Fal.ai 暗调倾向。
+
+---
+
 ## 2026-07-31 中国纪实风格 + LLM模型升级 + 对标分析
 
 ### LLM 全链路升级 ✅

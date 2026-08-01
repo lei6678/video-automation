@@ -118,8 +118,7 @@ for i in [1,2,3]:
 
 # Also analyze our old and new versions for comparison
 for label, paths in [
-    ('chinese_docu_v1', ['D:/chinese_docu_test/test_01.png', 'D:/chinese_docu_test/test_02.png', 'D:/chinese_docu_test/test_03.png']),
-    ('gemini_v2', ['D:/gemini_style_test/gemini_01.png', 'D:/gemini_style_test/gemini_02.png', 'D:/gemini_style_test/gemini_03.png']),
+    ('chinese_docu_v3', ['D:/chinese_docu_test/test_01.png', 'D:/chinese_docu_test/test_02.png', 'D:/chinese_docu_test/test_03.png']),
 ]:
     for idx, path in enumerate(paths):
         analyze(path, f'{label}_{idx+1}')
