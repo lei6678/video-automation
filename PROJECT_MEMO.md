@@ -1,5 +1,42 @@
 # 项目备忘录
 
+## 2026-08-02 中国纪实风 v4 prompt 修正 + 像素验证
+
+### v4 亮度+纹理修正 ✅
+
+三处 prompt 修改（`image_service.py`）：
+
+| 位置 | v3 | v4 |
+|------|-----|-----|
+| STYLE_BIBLES | 开头=方向性光源 | 开头=**well-lit natural exposure, ample ambient light, bright mid-tones, no murky underexposure** |
+| STYLE_BIBLES | natural skin texture | **visible fine detail + micro-texture (skin pores, fabric weave, weathered surfaces)** |
+| STYLE_BIBLES | 无 | **Visible film grain or subtle noise texture, no overly smooth or plastic rendering** |
+| STYLE_PROMPT_MAP | 9 项 | +well-lit +bright mid-tones +visible fine detail +subtle film grain +tactile surface texture (14 项) |
+| EMOTION_LIGHTING daily | 无亮度前置 | **Well-lit natural exposure, bright mid-tones, visible fine detail and subtle texture** |
+
+策略：正面指令替代负面禁令 — 不说"don't make it dark"说"well-lit, bright mid-tones"。
+
+### v4 像素验证结果
+
+跑 `test_chinese_docu.py`（双胞胎文案 1893 字，30 句）→ 生图 3 张全成功。
+
+| 指标 | v3 最差 | v4 最差 | 标杆 |
+|------|---------|---------|------|
+| 最暗格 L | **14** (近纯黑) | **29** | 34-76 |
+| Edge Density | 3-4 | **4-6** | 7-12 |
+| Texture Mean | - | 3.7-6.4 | 6.7-12.2 |
+| 冷色% (中区) | - | 1.4%-17.2% | 5.4%-34.6% |
+
+**🟢 亮度解决**：L=14→29+，核心指令生效
+**🟡 纹理/边缘**：小幅提升但距标杆还差 2-3 倍
+**🟡 冷阴影**：v4_2 生效(17.2%)，v4_1/v4_3 仍偏低
+
+### 明天计划
+
+v5：更激进纹理指令（heavy film grain, coarse texture, detailed surfaces），可能尝试在 prompt 中直接量化为"visible texture like ISO 800 film grain"。
+
+---
+
 ## 2026-08-01 中国纪实风 v3 prompt 修正 + 像素验证
 
 ### v3 prompt 修正 ✅

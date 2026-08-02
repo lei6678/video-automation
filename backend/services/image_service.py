@@ -86,15 +86,20 @@ STYLE_BIBLES = {
         "medium format film look, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        "Chinese documentary realism. Single natural light source with clear direction, "
+        "Chinese documentary realism. Well-lit natural exposure with ample ambient light, "
+        "bright mid-tones, no murky underexposure. "
+        "Single natural light source with clear direction, "
         "natural light falloff creating cool neutral shadows away from the light. "
         "Well-exposed true highlights (window light, practical lamps, skin rim light), "
         "deep neutral shadows with realistic dynamic range, no crushed blacks. "
         "Neutral white balance, no color cast, no warm filter. "
         "Shallow depth of field: sharp foreground subject against softly blurred background, "
         "clear spatial separation and depth. "
-        "Real people in authentic unposed moments, natural skin texture. "
-        "Weathered lived-in Chinese environments: concrete walls, wooden furniture, faded fabrics. "
+        "Real people in authentic unposed moments, natural skin texture with visible fine detail "
+        "and micro-texture (skin pores, fabric weave, weathered surfaces). "
+        "Visible film grain or subtle noise texture, no overly smooth or plastic rendering. "
+        "Weathered lived-in Chinese environments: concrete walls, wooden furniture, faded fabrics "
+        "with tactile surface detail. "
         "Muted earth tones + faded indigo blue + soft olive green, balanced with cool shadow tones. "
         "Handheld documentary feel, photojournalism composition with clear visual focal point."
     ),
@@ -136,9 +141,11 @@ STYLE_PROMPT_MAP = {
         "medium format film, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        ", directional natural light, cool neutral shadows, well-exposed highlights, "
+        ", well-lit natural exposure, bright mid-tones, ample ambient light, "
+        "directional natural light, cool neutral shadows, well-exposed highlights, "
         "realistic dynamic range, neutral white balance, shallow depth of field, "
-        "natural skin texture, photojournalism composition, documentary photography"
+        "natural skin texture, visible fine detail, subtle film grain, "
+        "tactile surface texture, photojournalism composition, documentary photography"
     ),
 }
 
@@ -168,8 +175,10 @@ EMOTION_LIGHTING = {
         "cinematic rim lighting, epic and nostalgic atmosphere"
     ),
     "daily": (
-        "Soft directional natural light, subtle light falloff into cool shadows, "
-        "neutral color palette, gentle depth of field, natural documentary style"
+        "Well-lit natural exposure, soft directional natural light, "
+        "subtle light falloff into cool shadows, bright mid-tones, "
+        "neutral color palette, gentle depth of field, "
+        "visible fine detail and subtle texture, natural documentary style"
     ),
 }
 
