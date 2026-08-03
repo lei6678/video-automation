@@ -1,5 +1,40 @@
 # 项目备忘录
 
+## 2026-08-03 三大修复：风格劫持 + JSON兜底 + 情绪打光统一
+
+### 一、风格劫持修复 ✅
+
+**bug**：`_detect_sentence_mood` 根据文案关键词返回 `philosophy`/`warm_book`/`documentary_realism`，这些 key 在 `STYLE_BIBLES` 中存在，导致用户选的中国纪实风被偷偷换成哲学思辨风（Terrence Malick golden hour, cool-warm color contrast）——所有风格都有此问题。
+
+**修复**：`image_service.py` 两处（`_generate_one` + `regenerate_single_image`）移除情绪检测对 style_bible 的覆盖，始终使用用户选择的风格。情绪仅通过 screenplay 的 emotion 字段注入 EMOTION_LIGHTING。
+
+### 二、DeepSeek JSON 解析兜底 ✅
+
+**bug**：`generate_screenplay` 中 DeepSeek 偶发返回缺逗号的非法 JSON → 剧本生成失败 → 中止生图（保护 API 费用）。
+
+**修复**：`image_service.py` 新增 `_repair_json()` 函数（补缺逗号/去尾逗号），`json.loads` 失败时自动修复重试，零额外 API 费用。
+
+### 三、EMOTION_LIGHTING 统一自然光 ✅
+
+**问题**：tragedy=`low key lighting, deep shadows` → 画面黑到看不清。glory=`warm amber gold` → 暖黄泛滥。transition=`golden hour` → 日落红。四套打光互相打架，跟纪实风 neutral white balance 自相矛盾。
+
+**修复**：四个情绪全部统一为：
+```
+natural daylight, soft directional light, bright even exposure,
+realistic colors, natural shallow depth of field, unposed genuine atmosphere
+```
+画面多样性靠剧本 scene_desc 内容变化，不靠滤镜渲染情绪。
+
+### 四、任务列表页（已回退）
+
+加了前端任务列表 + `GET /api/tasks`，用户觉得不方便，前端已恢复。后端接口保留不影响。
+
+### 明天计划
+
+验证统一自然光后的生图效果，如果满意则继续推进其他优化。
+
+---
+
 ## 2026-08-02 中国纪实风 v4 prompt 修正 + 像素验证
 
 ### v4 亮度+纹理修正 ✅

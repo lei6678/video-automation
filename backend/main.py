@@ -145,6 +145,17 @@ class ImageSummary(BaseModel):
     complete: bool = False
 
 
+class TaskListItem(BaseModel):
+    """任务列表项（轻量摘要，供前端任务列表使用）"""
+    id: int
+    source_url: str
+    status: str
+    current_step: int
+    video_title: str | None = None
+    content_mode: str = "book"
+    created_at: datetime | None = None
+
+
 class TaskDetailResponse(BaseModel):
     """任务详情响应（v9：含配图进度摘要）"""
     id: int
@@ -557,6 +568,24 @@ async def import_rewritten(request: ImportRewrittenRequest, db: Session = Depend
         video_title=request.video_title,
         message=f"已导入，可直接开始配音/生图/合成",
     )
+
+
+@app.get("/api/tasks", response_model=list[TaskListItem])
+async def list_tasks(db: Session = Depends(get_db)):
+    """列出所有任务（按创建时间倒序），供前端任务列表使用"""
+    tasks = db.query(Task).order_by(Task.created_at.desc()).all()
+    return [
+        {
+            "id": t.id,
+            "source_url": t.source_url,
+            "status": t.status,
+            "current_step": t.current_step,
+            "video_title": t.video_title,
+            "content_mode": t.content_mode,
+            "created_at": t.created_at,
+        }
+        for t in tasks
+    ]
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskDetailResponse)

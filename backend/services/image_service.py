@@ -86,22 +86,13 @@ STYLE_BIBLES = {
         "medium format film look, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        "Chinese documentary realism. Well-lit natural exposure with ample ambient light, "
-        "bright mid-tones, no murky underexposure. "
-        "Single natural light source with clear direction, "
-        "natural light falloff creating cool neutral shadows away from the light. "
-        "Well-exposed true highlights (window light, practical lamps, skin rim light), "
-        "deep neutral shadows with realistic dynamic range, no crushed blacks. "
-        "Neutral white balance, no color cast, no warm filter. "
-        "Shallow depth of field: sharp foreground subject against softly blurred background, "
-        "clear spatial separation and depth. "
-        "Real people in authentic unposed moments, natural skin texture with visible fine detail "
-        "and micro-texture (skin pores, fabric weave, weathered surfaces). "
-        "Visible film grain or subtle noise texture, no overly smooth or plastic rendering. "
-        "Weathered lived-in Chinese environments: concrete walls, wooden furniture, faded fabrics "
-        "with tactile surface detail. "
-        "Muted earth tones + faded indigo blue + soft olive green, balanced with cool shadow tones. "
-        "Handheld documentary feel, photojournalism composition with clear visual focal point."
+        "Steve McCurry photographic style, cinematic sharpness, ultra-high definition, "
+        "full-frame DSLR photography, Canon EOS 5D Mark IV, 35mm f/1.4 prime lens, "
+        "shallow depth of field, natural window light, soft ambient shadows, "
+        "neutral white balance, true-to-life colors, "
+        "highly detailed, photorealistic, masterpiece, "
+        "ordinary Chinese people in everyday unposed moments, "
+        "real environments: homes, streets, schools, markets, workplaces"
     ),
 }
 
@@ -141,11 +132,9 @@ STYLE_PROMPT_MAP = {
         "medium format film, honest and grounded aesthetic"
     ),
     "chinese_docu": (
-        ", well-lit natural exposure, bright mid-tones, ample ambient light, "
-        "directional natural light, cool neutral shadows, well-exposed highlights, "
-        "realistic dynamic range, neutral white balance, shallow depth of field, "
-        "natural skin texture, visible fine detail, subtle film grain, "
-        "tactile surface texture, photojournalism composition, documentary photography"
+        ", Steve McCurry portrait style, Canon 5D Mark IV, 35mm f/1.4, "
+        "natural window light, neutral colors, shallow depth of field, "
+        "ultra-high definition, cinematic sharpness, photorealistic, highly detailed"
     ),
 }
 
@@ -163,22 +152,20 @@ SAFETY_SUFFIX = (
 
 EMOTION_LIGHTING = {
     "glory": (
-        "Warm amber and gold color palette, bright marquee lights, high contrast, "
-        "radiant cinematic lighting, hopeful atmosphere"
+        "natural daylight, soft directional light, bright even exposure, "
+        "realistic colors, natural shallow depth of field, unposed genuine atmosphere"
     ),
     "tragedy": (
-        "Cold cyan and grey tone, desaturated colors, overcast lighting, "
-        "deep shadows, melancholic and oppressive atmosphere, low key lighting"
+        "natural daylight, soft directional light, bright even exposure, "
+        "realistic colors, natural shallow depth of field, unposed genuine atmosphere"
     ),
     "transition": (
-        "Golden hour lighting, sunset silhouette, dusty air, rim light, "
-        "cinematic rim lighting, epic and nostalgic atmosphere"
+        "natural daylight, soft directional light, bright even exposure, "
+        "realistic colors, natural shallow depth of field, unposed genuine atmosphere"
     ),
     "daily": (
-        "Well-lit natural exposure, soft directional natural light, "
-        "subtle light falloff into cool shadows, bright mid-tones, "
-        "neutral color palette, gentle depth of field, "
-        "visible fine detail and subtle texture, natural documentary style"
+        "natural daylight, soft directional light, bright even exposure, "
+        "realistic colors, natural shallow depth of field, unposed genuine atmosphere"
     ),
 }
 
@@ -343,6 +330,24 @@ async def plan_visual_arc(
         return {}
 
 
+def _repair_json(text: str) -> str:
+    """修复 LLM 输出的常见 JSON 格式错误（缺逗号、尾逗号）。"""
+    import re as _re
+    # 1. 去除尾逗号：",}" → "}", ",]" → "]"
+    text = _re.sub(r',\s*}', '}', text)
+    text = _re.sub(r',\s*]', ']', text)
+    # 2. 补缺逗号："}\n{" → "},\n{"（数组中对象之间）
+    text = _re.sub(r'\}\s*\n\s*\{', '},\n{', text)
+    # 3. 补缺逗号："]\n{" → "],\n{"
+    text = _re.sub(r'\]\s*\n\s*\{', '],\n{', text)
+    # 4. 补缺逗号：'"\n"key" → '",\n"key"（对象属性之间）
+    text = _re.sub(r'"\s*\n\s*"', '",\n"', text)
+    # 5. 补缺逗号：数字/true/false/null 后缺逗号接下一行 "
+    text = _re.sub(r'(\d)\s*\n\s*"', r'\1,\n"', text)
+    text = _re.sub(r'(true|false|null)\s*\n\s*"', r'\1,\n"', text)
+    return text
+
+
 async def generate_screenplay(
     rewritten_transcript: str,
     book_title: str = "",
@@ -486,7 +491,12 @@ async def generate_screenplay(
                 finish_reason = data["choices"][0].get("finish_reason", "unknown")
                 if content.startswith("```"):
                     content = content.split("\n", 1)[1].rstrip("```").strip()
-                screenplay = json.loads(content)
+                try:
+                    screenplay = json.loads(content)
+                except json.JSONDecodeError:
+                    repaired = _repair_json(content)
+                    screenplay = json.loads(repaired)
+                    print("[image:screenplay] JSON repaired successfully")
                 cast_count = len(screenplay.get("character_cast", []))
                 scene_count = len(screenplay.get("scenes", []))
                 print(f"[image:screenplay] OK — {cast_count} characters, {scene_count} scenes")
@@ -740,6 +750,19 @@ _CONTENT_SANITIZE_MAP: list[tuple[str, str]] = [
     ("色情", ""),
     # 少儿安全
     ("虐待儿童", ""),
+    ("小丫头", "孩子"),
+    ("六岁的", "年幼的"),
+    ("五岁的", "年幼的"),
+    ("七岁的", "年幼的"),
+    ("八岁的", "年幼的"),
+    ("抱着门框哭", "站在门口"),
+    ("哭得嗓子都哑了", "安静地站在那里"),
+    ("嫌闺女是个累赘", "觉得孩子需要更多照顾"),
+    ("累赘", "负担"),
+    ("没人要的孩子", "需要关爱的孩子"),
+    ("弃婴", "新生儿"),
+    ("被抛弃", "被托付给家人"),
+    ("抛弃", "送走"),
     ("虐童", ""),
     ("拐卖", "带走了"),
     # 自残类
@@ -842,7 +865,7 @@ def _detect_sentence_mood(
 # ============== 风格前缀（根据风格类型选择 prompt 开头，纪实=documentary / 电影=cinematic）==============
 
 STYLE_PREFIX = {
-    "chinese_docu": "A documentary photograph",
+    "chinese_docu": "A cinematic photograph",
     "documentary_realism": "A neorealist photograph",
     "warm_docu": "A documentary photograph",
     "default": "A cinematic photograph",
@@ -929,14 +952,18 @@ def build_single_segment_prompt(
     }.get(shot_type, "medium shot")
 
     prompt_prefix = STYLE_PREFIX.get(style_key, STYLE_PREFIX["default"])
+
+    # v9: 自然段落格式，去掉 Subject:/Scene:/Lighting:/Style: 标签体
+    # 接近手写英文 prompt 的流畅描述，对 gpt-image-2 友好
+    char_part = f" {char_profile.strip()}" if char_profile.strip() else ""
+    face_part = f" {face_rule.strip()}" if face_rule.strip() else ""
+
     prompt = (
-        f"{prompt_prefix}, 8:9 vertical, {shot_hint}. "
-        f"Subject: {visual_subject}. "
-        f"Scene: {composition}. "
-        f"Lighting: {emotion_light}. "
-        f"{char_profile}"
-        f"{face_rule}"
-        f"Style: {style_bible}. "
+        f"{prompt_prefix} in {aspect_ratio} format. "
+        f"{shot_hint} of {visual_subject}. "
+        f"{composition} "
+        f"{emotion_light}.{char_part}{face_part}"
+        f" The overall aesthetic is {style_bible}. "
         f"single image, no text, no watermark"
     )
     print(
@@ -1399,17 +1426,14 @@ async def generate_all_images(
                 f"{text_len} 字, size={REQUEST_W}x{REQUEST_H}, aspect={aspect_ratio}"
             )
 
-            # ★ 情绪检测：自动匹配最贴合文案氛围的 Style Bible
-            sentence_style = _detect_sentence_mood(sentence, visual_context)
-            if sentence_style != "default":
-                actual_style_bible = STYLE_BIBLES.get(sentence_style, style_bible)
-                actual_style_suffix = STYLE_PROMPT_MAP.get(sentence_style, STYLE_PROMPT_MAP["default"])
-            else:
-                actual_style_bible = style_bible
-                actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
+            # 始终使用用户选择的风格，不随情绪检测变化
+            # 情绪（glory/tragedy/transition/daily）已通过 screenplay → EMOTION_LIGHTING 注入 prompt
+            actual_style_bible = style_bible
+            actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
             # 构建 Prompt（v8 storyboard）
-            prompt_style_key = sentence_style if sentence_style != "default" else style
+            # ★ style_key 始终用用户选择的风格，不随情绪检测变化
+            # 情绪检测只影响 style_bible + emotion_lighting，不影响 prompt 风格前缀
             base_prompt = build_single_segment_prompt(
                 text=sentence,
                 book_title=book_title,
@@ -1417,7 +1441,7 @@ async def generate_all_images(
                 segment_index=seg_idx,
                 total_segments=total_segments,
                 style_bible=actual_style_bible,
-                style_key=prompt_style_key,
+                style_key=style,
                 aspect_ratio=aspect_ratio,
                 visual_context=visual_context,
                 visual_plan=visual_plan,
@@ -1451,10 +1475,11 @@ async def generate_all_images(
                             img_bytes = base64.b64decode(b64)
                             final_prompt = sanitized
                     if not img_bytes:
-                        # 预备方案：降级到简洁 prompt（原句文本 + 风格后缀），绕过审核敏感词
+                        # 预备方案：降级到简洁 prompt（原句先过 _sanitize_prompt 过滤敏感词）
+                        safe_sentence = _sanitize_prompt(sentence.strip())
                         fallback_prompt = (
                             f"A cinematic vertical composition, 8:9 near-square vertical composition. "
-                            f"Scene inspired by: {sentence.strip()}. "
+                            f"Scene inspired by: {safe_sentence}. "
                         ) + actual_style_suffix + " " + SAFETY_SUFFIX
                         print(f"[image:v4] 段 {seg_idx + 1} 降敏重试也失败 → 尝试简洁 prompt 备选")
                         b64 = await _generate_fal(fallback_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
@@ -1663,13 +1688,9 @@ async def regenerate_single_image(
         TARGET_W, TARGET_H = 1080, 1920
 
     # ★ 情绪检测：自动匹配最贴合文案氛围的 Style Bible
-    sentence_style = _detect_sentence_mood(text, visual_context)
-    if sentence_style != "default":
-        actual_style_bible = STYLE_BIBLES.get(sentence_style, style_bible)
-        actual_style_suffix = STYLE_PROMPT_MAP.get(sentence_style, STYLE_PROMPT_MAP["default"])
-    else:
-        actual_style_bible = style_bible
-        actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
+    # 始终使用用户选择的风格，不随情绪检测变化
+    actual_style_bible = style_bible
+    actual_style_suffix = STYLE_PROMPT_MAP.get(style, STYLE_PROMPT_MAP["default"])
 
     # 用户自定义 prompt 优先，否则自动构建简单 prompt
     if custom_prompt and custom_prompt.strip():
@@ -1678,9 +1699,10 @@ async def regenerate_single_image(
     else:
         aspect_hint = "8:9 near-square vertical composition" if aspect_ratio == "8:9" else f"{aspect_ratio} vertical"
         prompt_prefix = STYLE_PREFIX.get(sentence_style if sentence_style != "default" else style, STYLE_PREFIX["default"])
+        safe_text = _sanitize_prompt(text.strip())
         base_prompt = (
             f"{prompt_prefix}, {aspect_hint}. "
-            f"Scene inspired by: {text.strip()}. "
+            f"Scene inspired by: {safe_text}. "
             f"single image, no text, no watermark"
         )
         prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
@@ -1695,7 +1717,18 @@ async def regenerate_single_image(
             b64 = await _generate_fal(sanitized, width=REQUEST_W, height=REQUEST_H, quality=quality)
             if b64:
                 prompt = sanitized
-        # 仍失败 → 放弃，不跨平台、不降级质量
+        if not b64:
+            # 第三级：全通用兜底（完全剥离原文，仅保留风格氛围）
+            fallback_prompt = (
+                f"{prompt_prefix}, {aspect_hint}. "
+                f"A quiet emotional scene in an everyday Chinese setting, "
+                f"soft natural light, gentle atmosphere. "
+                f"single image, no text, no watermark"
+            ) + actual_style_suffix + " " + SAFETY_SUFFIX
+            print(f"[image:single] 降敏重试也失败 → 通用兜底")
+            b64 = await _generate_fal(fallback_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)
+            if b64:
+                prompt = fallback_prompt
     img_bytes = base64.b64decode(b64) if b64 else None
 
     target_path = os.path.join(images_dir, f"seg_{segment_index:03d}.png")
