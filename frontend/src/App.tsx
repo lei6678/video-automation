@@ -1388,7 +1388,6 @@ function App() {
                 >
                   <option value="default">默认电影感</option>
                   <option value="chinese_docu">🇨🇳 中国本土纪实</option>
-                  <option value="warm_docu">温暖纪实风</option>
                   <option value="wong_kar_wai">王家卫电影感</option>
                   <option value="warm_book">温暖治愈书单</option>
                   <option value="clean_health">明亮健康生活</option>
@@ -1462,9 +1461,6 @@ function App() {
               )}
               {selectedImageStyle === 'philosophy' && (
                 <span>💡 画面调性：偏向暗沉深邃的色调、阴影感强烈、带有一点艺术史诗的孤独与深思氛围。 | 🎯 推荐赛道：深度人生感悟、中年危机破局、商业认知觉醒、高端思维模型。</span>
-              )}
-              {selectedImageStyle === 'warm_docu' && (
-                <span>💡 画面调性：全程统一暖调、自然柔光、杂志纪实摄影质感，不跳色温，真实接地气。 | 🎯 推荐赛道：人物传记、真实故事、情感纪实、生活记录。</span>
               )}
               {selectedImageStyle === 'wong_kar_wai' && (
                 <span>💡 画面调性：霓虹湿街、慢门抽帧、高饱和红绿色调、85mm浅景深、怀旧抽帧感。 | 🎯 推荐赛道：文艺短片、情感独白、都市故事、复古氛围感。</span>

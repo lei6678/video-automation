@@ -1,5 +1,43 @@
 # 项目备忘录
 
+## 2026-08-04 Prompt 通用增强 + 风格精简（朋友方案对比后吸收）
+
+### 一、Prompt 三处通用增强 ✅
+
+基于朋友文档对比，三条改动覆盖全部 6 种风格：
+
+| # | 改动 | 效果 |
+|---|------|------|
+| 禁止插画 | SAFETY_SUFFIX + build_single_segment_prompt 显式追加 `no illustration, cartoon, anime, 3D render, CGI` | 每条 prompt 都有硬约束 |
+| 年龄动态 | 新增 `_has_age_span()` 检测角色表多年龄版本 → prompt 注入年龄提醒 | 跨年代故事不再全画同一个年龄 |
+| 不输出文字 | `no text, no watermark` → `no text in the image, no watermark` | 强化 |
+
+### 二、Bug 修复 ✅
+
+`regenerate_single_image` 第 1728 行引用未定义 `sentence_style`（风格劫持修复漏删）→ NameError → 已修复。
+
+### 三、风格精简：8 → 6 ✅
+
+| 操作 | 原因 |
+|------|------|
+| 删 `warm_docu` | 跟 `documentary_realism` 几乎一样，合并 |
+| 删 `documentary_realism` | 对比生图测试后 `chinese_docu` 胜出（中性白平衡+高清晰>暖调粗粝）|
+
+最终 6 风格：`default` / `chinese_docu` / `wong_kar_wai` / `warm_book` / `clean_health` / `philosophy`
+
+### 四、朋友方案评估结论
+
+- 我们的 screenplay+storyboard 架构优于朋友，不换
+- 朋友的 prompt 工程细节值得吸收（显式禁令、指令格式化）
+- 朋友的情绪检测自动切风理念与我们的风格锁定冲突 → 保留风格锁定
+- 朋友的可灵备选通道我们没有 → 暂不恢复
+
+### 明天计划
+
+端到端验证今日 prompt 改动后的生图效果。
+
+---
+
 ## 2026-08-03 三大修复：风格劫持 + JSON兜底 + 情绪打光统一
 
 ### 一、风格劫持修复 ✅

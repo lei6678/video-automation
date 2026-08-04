@@ -61,14 +61,6 @@ STYLE_BIBLES = {
         "solitary walk on coastline, mountain summit vista, rooftop at dusk, empty library, "
         "contemplative depth, Terrence Malick golden hour, anamorphic lens feel"
     ),
-    "documentary_realism": (
-        "cinematic neorealism, atmospheric natural light through windows and doorways, "
-        "warm earth tones + faded sage greens + dusty rose, "
-        "intimate handheld composition, shallow depth of field on faces and hands, "
-        "aged textures — weathered wood, peeling paint, worn fabric — beautiful in their decay, "
-        "ordinary people in quiet moments of dignity, "
-        "inspired by Wong Kar-wai and Zhang Yimou's early works"
-    ),
     "wong_kar_wai": (
         "Wong Kar-wai cinematic aesthetic, rain-soaked neon streets, saturated reds and greens, "
         "slow shutter drag with motion blur, step-printing rhythm, "
@@ -76,14 +68,6 @@ STYLE_BIBLES = {
         "nostalgic 1960s Hong Kong atmosphere, rich film grain, "
         "high contrast chiaroscuro, dreamlike color wash, "
         "solitary figures in crowded spaces, emotional texture over plot"
-    ),
-    "warm_docu": (
-        "warm natural tones throughout, consistent cohesive color palette, "
-        "soft daylight, gentle shadows, no dramatic color shifts, "
-        "documentary photography, editorial magazine composition, "
-        "ordinary people in authentic unposed moments, clean composition, "
-        "warm browns + muted amber + soft cream, natural textures, "
-        "medium format film look, honest and grounded aesthetic"
     ),
     "chinese_docu": (
         "Steve McCurry photographic style, cinematic sharpness, ultra-high definition, "
@@ -115,21 +99,11 @@ STYLE_PROMPT_MAP = {
         ", moody dramatic lighting, melancholic low key, surrealism texture, "
         "wide landscape scale, anamorphic lens feel, contemplative atmosphere"
     ),
-    "documentary_realism": (
-        ", cinematic photography, atmospheric lighting, rich textures, "
-        "award-winning composition, elegant, timeless"
-    ),
     "wong_kar_wai": (
         ", Wong Kar-wai film aesthetic, 85mm lens, shallow depth of field, "
         "beautiful bokeh, photorealistic, ultra-high definition, masterpiece, "
         "highly detailed skin texture, rich cinematic contrast, "
         "nostalgic retro film aesthetic"
-    ),
-    "warm_docu": (
-        ", warm natural tones, consistent cohesive color palette, "
-        "soft daylight, gentle shadows, documentary photography style, "
-        "editorial composition, authentic unposed feel, "
-        "medium format film, honest and grounded aesthetic"
     ),
     "chinese_docu": (
         ", Steve McCurry portrait style, Canon 5D Mark IV, 35mm f/1.4, "
@@ -143,7 +117,8 @@ STYLE_PROMPT_MAP = {
 SAFETY_SUFFIX = (
     ", single image, no collage, no multi-panel, no grid, "
     "highly detailed, natural skin texture, no duplicate faces, "
-    "masterpiece composition, no text, no watermark, no graphic overlay"
+    "masterpiece composition, no text, no watermark, no graphic overlay, "
+    "must be a real photograph, no illustration, no cartoon, no anime, no 3D render, no CGI"
 )
 
 # ============== 王家卫电影感（v10：从全局锁改为可选风格）==============
@@ -786,7 +761,6 @@ def _sanitize_prompt(prompt: str) -> str:
 
 # 情绪关键词 → 最适合的 Style Bible
 _MOOD_STYLE_MAP: dict[str, str] = {
-    "documentary_realism": "documentary_realism",
     "warm_book": "warm_book",
     "philosophy": "philosophy",
     "default": "default",
@@ -827,7 +801,7 @@ def _detect_sentence_mood(
 ) -> str:
     """
     根据句子文本和视觉档案的情绪基调，自动选择最匹配的 Style Bible。
-    返回风格 key: "documentary_realism" | "warm_book" | "philosophy" | "default"
+    返回风格 key: "warm_book" | "philosophy" | "default"
     """
     combined = f"{visual_context}\n{sentence}"
 
@@ -837,7 +811,7 @@ def _detect_sentence_mood(
 
     # 优先匹配最强的情绪信号
     if tragic_score >= warm_score and tragic_score >= philo_score and tragic_score > 0:
-        return "documentary_realism"
+        return "default"
     if warm_score >= tragic_score and warm_score >= philo_score and warm_score > 0:
         return "warm_book"
     if philo_score >= tragic_score and philo_score >= warm_score and philo_score > 0:
@@ -852,7 +826,7 @@ def _detect_sentence_mood(
             tragic_in_context = any(kw in mood_text for kw in _TRAGIC_KEYWORDS)
             warm_in_context = any(kw in mood_text for kw in _WARM_KEYWORDS)
             if tragic_in_context:
-                return "documentary_realism"
+                return "default"
             if warm_in_context:
                 return "warm_book"
 
@@ -866,14 +840,27 @@ def _detect_sentence_mood(
 
 STYLE_PREFIX = {
     "chinese_docu": "A cinematic photograph",
-    "documentary_realism": "A neorealist photograph",
-    "warm_docu": "A documentary photograph",
     "default": "A cinematic photograph",
     "wong_kar_wai": "A cinematic film still",
     "warm_book": "A cinematic photograph",
     "clean_health": "A lifestyle photograph",
     "philosophy": "A contemplative photograph",
 }
+
+
+def _has_age_span(character_cast: list) -> bool:
+    """检测角色表中是否有同一角色跨多个年龄版本（如"young Li Dacheng"+"older Li Dacheng"）。"""
+    if not character_cast or len(character_cast) < 2:
+        return False
+
+    def _base_name(name: str) -> str:
+        return re.sub(
+            r'^(young|older|elderly|teenage|middle-aged|aged|old|little)\s+',
+            '', name, flags=re.IGNORECASE
+        ).strip()
+
+    base_names = [_base_name(c.get("name", "")) for c in character_cast if c.get("name", "").strip()]
+    return len(set(base_names)) < len(base_names)
 
 
 def build_single_segment_prompt(
@@ -958,13 +945,24 @@ def build_single_segment_prompt(
     char_part = f" {char_profile.strip()}" if char_profile.strip() else ""
     face_part = f" {face_rule.strip()}" if face_rule.strip() else ""
 
+    # 年龄跨度提示：同一角色跨越多年龄段时提醒模型
+    age_hint = ""
+    if _has_age_span(character_cast):
+        age_hint = (
+            "If the character appears at different ages in this story, "
+            "show them at the exact age appropriate for this specific scene. "
+            "Do not depict all scenes with the same age. "
+        )
+
     prompt = (
         f"{prompt_prefix} in {aspect_ratio} format. "
         f"{shot_hint} of {visual_subject}. "
         f"{composition} "
         f"{emotion_light}.{char_part}{face_part}"
         f" The overall aesthetic is {style_bible}. "
-        f"single image, no text, no watermark"
+        f"Must be a real photograph. No illustration, cartoon, anime, 3D render, or CGI. "
+        f"{age_hint}"
+        f"single image, no text in the image, no watermark"
     )
     print(
         f"[image:prompt] seg {segment_index} v8分镜, "
@@ -1698,12 +1696,11 @@ async def regenerate_single_image(
         print(f"[image:single] 使用自定义 prompt task={task_id} sent={segment_index}, len={len(prompt)}")
     else:
         aspect_hint = "8:9 near-square vertical composition" if aspect_ratio == "8:9" else f"{aspect_ratio} vertical"
-        prompt_prefix = STYLE_PREFIX.get(sentence_style if sentence_style != "default" else style, STYLE_PREFIX["default"])
+        prompt_prefix = STYLE_PREFIX.get(style, STYLE_PREFIX["default"])
         safe_text = _sanitize_prompt(text.strip())
         base_prompt = (
             f"{prompt_prefix}, {aspect_hint}. "
             f"Scene inspired by: {safe_text}. "
-            f"single image, no text, no watermark"
         )
         prompt = base_prompt + actual_style_suffix + SAFETY_SUFFIX
         print(f"[image:single] 单句配图 task={task_id} sent={segment_index}, text_len={len(text)}, aspect={aspect_ratio}")
