@@ -11,9 +11,10 @@ import time
 import asyncio
 import httpx
 from typing import Optional
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # TikHub API 配置
 TIKHUB_API_KEY = os.getenv("TIKHUB_API_KEY", "")

@@ -40,7 +40,7 @@ interface TaskDetail {
 }
 
 interface CleanResult { cleaned: string }
-interface RewriteResult { rewritten: string; video_title?: string }
+interface RewriteResult { rewritten: string; video_title?: string; tts_invalidated?: boolean }
 interface BookInfoResult {
   book_title: string
   book_author: string
@@ -141,7 +141,7 @@ function App() {
   const [isImageLoading, setIsImageLoading] = useState(false)
   const [images, setImages] = useState<any[]>([])
   const [imageMessage, setImageMessage] = useState('')
-  const [selectedImageStyle, setSelectedImageStyle] = useState('default')
+  const [selectedImageStyle, setSelectedImageStyle] = useState('chinese_docu')
   const [selectedAspectRatio, setSelectedAspectRatio] = useState('8:9')  // v4: 16:9 横图 | 9:16 竖图 | 8:9 对标卡片
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)  // 轮询定时器
 
@@ -241,6 +241,10 @@ function App() {
       if (rewriteData.video_title) {
         setVideoTitle(rewriteData.video_title)
       }
+      if (rewriteData.tts_invalidated) {
+        setSegments([])
+        setFinalAudioUrl('')
+      }
     } catch (e) {
       console.error('改写失败:', e)
     } finally {
@@ -314,6 +318,11 @@ function App() {
       // v5: 自动灌装爆款标题
       if (data.video_title) {
         setVideoTitle(data.video_title)
+      }
+      // 改写后旧配音已失效，清除状态
+      if (data.tts_invalidated) {
+        setSegments([])
+        setFinalAudioUrl('')
       }
     } catch (error) {
       console.error('改写失败:', error)
@@ -1452,6 +1461,9 @@ function App() {
               <span className="font-medium text-gray-600">🎬 导演指南：</span>
               {selectedImageStyle === 'default' && (
                 <span>💡 画面调性：强调电影质感、强烈的明暗对比、背景虚化，充满高级的故事叙事感。 | 🎯 推荐赛道：全赛道通用，尤其是情感故事、长文案解说、图书带货。</span>
+              )}
+              {selectedImageStyle === 'chinese_docu' && (
+                <span>💡 画面调性：中性白平衡、自然日光、方向性柔光+冷阴影过渡、真实纹理与胶片颗粒感、浅景深分离。杜绝AI塑料感和暖调滤镜。 | 🎯 推荐赛道：真实人物传记、社会纪实故事、民间生活记录、深度人物报道。</span>
               )}
               {selectedImageStyle === 'warm_book' && (
                 <span>💡 画面调性：整体色调柔和温暖、像早晨铺满阳光的房间，有动漫治愈感。 | 🎯 推荐赛道：家庭教育、习惯培养、母婴育儿心得、温暖励志书单。</span>

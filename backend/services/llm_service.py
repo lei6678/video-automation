@@ -2,17 +2,20 @@
 大模型清洗服务 - DeepSeek API
 """
 import os
+from pathlib import Path
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-# 加载环境变量
-load_dotenv()
+# 加载环境变量（显式路径，避免 CWD 变化导致找不到 .env）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# 初始化 DeepSeek 客户端
+# 初始化 DeepSeek 客户端（显式 timeout 防偶发网络波动）
 client = AsyncOpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com"
+    base_url="https://api.deepseek.com",
+    timeout=60.0,
+    max_retries=2,
 )
 
 SYSTEM_PROMPT = """你是逐字稿修复清洗助手。你需要在保留事实和原文顺序的前提下，删除非正文噪声，修复乱码和明显ASR同音错词。你必须同时遵守视频号内容安全要求，避免输出任何低俗、暴力、虚假夸大、医疗承诺、导流诱导或误导性表达。输出必须是清洗后的纯正文。"""

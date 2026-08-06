@@ -27,8 +27,9 @@ import datetime
 from typing import Optional
 
 import httpx
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # ============== 凭证 ==============
 VOLC_APP_ID = os.getenv("VOLC_APP_ID", "5373024197")

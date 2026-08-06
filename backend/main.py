@@ -196,6 +196,7 @@ class RewriteResponse(BaseModel):
     """脚本改写响应（v5：含爆款标题）"""
     rewritten: str
     video_title: str = ""
+    tts_invalidated: bool = False  # 改写后旧配音分段已清除，前端需提示重新生成
 
 
 class BookInfoRequest(BaseModel):
@@ -1072,7 +1073,27 @@ async def rewrite(request: RewriteRequest, db: Session = Depends(get_db)):
     with open(rewritten_file, "w", encoding="utf-8") as f:
         f.write(rewritten)
 
-    return {"rewritten": rewritten, "video_title": video_title}
+    # ★ 改写后清除旧配音分段，防止配音与改写文案不一致
+    tts_invalidated = False
+    existing_segments = db.query(TaskSegment).filter(TaskSegment.task_id == task_id).count()
+    if existing_segments > 0:
+        print(f"[rewrite] 检测到 {existing_segments} 条旧配音分段 → 清除，需重新生成")
+        db.query(TaskSegment).filter(TaskSegment.task_id == task_id).delete()
+        db.commit()
+        # 删除旧音频文件
+        import shutil
+        segments_dir = os.path.join(task_folder, "segments")
+        if os.path.exists(segments_dir):
+            shutil.rmtree(segments_dir)
+            print(f"[rewrite] 已删除旧配音目录: {segments_dir}")
+        for old_audio in ["final_tts.mp3", "_draft_mixed_audio.mp3"]:
+            old_path = os.path.join(task_folder, old_audio)
+            if os.path.exists(old_path):
+                os.remove(old_path)
+                print(f"[rewrite] 已删除旧音频: {old_path}")
+        tts_invalidated = True
+
+    return {"rewritten": rewritten, "video_title": video_title, "tts_invalidated": tts_invalidated}
 
 
 # ============== 书籍信息反推接口 =============

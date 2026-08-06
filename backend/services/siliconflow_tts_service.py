@@ -18,8 +18,9 @@ import json
 import subprocess
 import httpx
 from typing import Optional
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 SILICONFLOW_KEY = os.getenv("SILICONFLOW_API_KEY", "")
 SILICONFLOW_BASE = "https://api.siliconflow.cn"

@@ -21,9 +21,10 @@ from _resource import get_data_dir
 
 import httpx
 from PIL import Image
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # ============== 凭证 ==============
 FAL_KEY = os.getenv("FAL_KEY", "")
@@ -589,7 +590,11 @@ async def generate_storyboard(
         f"=== SCENE BREAKDOWN ===\n{scene_summary}\n"
         f"=== SEGMENT TEXT (for precise shot matching) ===\n"
         + "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
-        + f"\n\nOutput {total_segments} shots as JSON array. Vary visual_subject and shot_type across segments."
+        + f"\n\nCRITICAL: Output exactly {total_segments} shots in the JSON array. "
+        f"Shot[i] MUST correspond to segment[i]. Do NOT skip any segment. "
+        f"Even if two adjacent segments are similar, create a separate shot for each "
+        f"with slightly different composition (e.g. different angle, distance, or framing). "
+        f"Every segment's text will be spoken in the video and needs a visual."
     )
 
     try:
@@ -885,24 +890,46 @@ def build_single_segment_prompt(
                  "use back view, side profile, silhouette, or environmental wide shot. ",
     }
 
-    # === v8 分镜脚本（storyboard 必须存在且数据完整，否则跳过该段，不降级不浪费API）===
-    if not storyboard:
-        print(f"[image:prompt] seg {segment_index} 无 storyboard → 跳过, 不浪费API")
-        return ""
-
-    shots = storyboard.get("shots", [])
-    character_cast = storyboard.get("character_cast", [])
-    face_policy = storyboard.get("face_policy", "show")
+    # === v8 分镜脚本 ===
+    # 优先使用 storyboard 分镜数据，数据不足时降级为简单 prompt（不掉段）
+    shots = storyboard.get("shots", []) if storyboard else []
+    character_cast = storyboard.get("character_cast", []) if storyboard else []
+    face_policy = storyboard.get("face_policy", "show") if storyboard else "show"
     face_rule = _face_rules.get(face_policy, "")
 
-    if segment_index >= len(shots):
-        print(f"[image:prompt] seg {segment_index} 分镜数据不足 (shots={len(shots)}) → 跳过, 不浪费API")
-        return ""
+    use_storyboard = (
+        storyboard
+        and segment_index < len(shots)
+        and isinstance(shots[segment_index], dict)
+        and shots[segment_index].get("composition", "").strip()
+    )
+
+    if not use_storyboard:
+        # ★ 降级：storyboard 数据不足 → 用原文句子构建简单 prompt，不掉段
+        reason = "无storyboard" if not storyboard else f"shots不足(shots={len(shots)})" if segment_index >= len(shots) else "composition为空"
+        print(f"[image:prompt] seg {segment_index} {reason} → 降级为简单prompt")
+
+        prompt_prefix = STYLE_PREFIX.get(style_key, STYLE_PREFIX["default"])
+        age_hint = ""
+        if character_cast and _has_age_span(character_cast):
+            age_hint = (
+                "If the character appears at different ages in this story, "
+                "show them at the exact age appropriate for this specific scene. "
+                "Do not depict all scenes with the same age. "
+            )
+        prompt = (
+            f"{prompt_prefix} in {aspect_ratio} format. "
+            f"A photorealistic scene that visually reflects: {_sanitize_prompt(text)}. "
+            f"natural daylight, soft directional light, bright even exposure. "
+            f"The overall aesthetic is {style_bible}. "
+            f"Must be a real photograph. No illustration, cartoon, anime, 3D render, or CGI. "
+            f"{age_hint}"
+            f"single image, no text in the image, no watermark"
+        )
+        print(f"[image:prompt] seg {segment_index} 降级prompt, len={len(prompt)}")
+        return prompt
 
     shot = shots[segment_index]
-    if not isinstance(shot, dict):
-        print(f"[image:prompt] seg {segment_index} shot 格式异常 → 跳过, 不浪费API")
-        return ""
 
     visual_subject = shot.get("visual_subject", "")
     shot_type = shot.get("shot_type", "medium")

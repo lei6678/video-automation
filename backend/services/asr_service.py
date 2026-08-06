@@ -3,9 +3,10 @@ ASR 语音识别服务 - 基于硅基流动 (SiliconFlow) API
 使用 FunAudioLLM/SenseVoiceSmall 模型进行高精度中文语音识别
 """
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from openai import AsyncOpenAI
 
