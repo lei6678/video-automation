@@ -118,7 +118,7 @@ STYLE_PROMPT_MAP = {
 SAFETY_SUFFIX = (
     ", single image, no collage, no multi-panel, no grid, "
     "highly detailed, natural skin texture, no duplicate faces, "
-    "masterpiece composition, no text, no watermark, no graphic overlay, "
+    "masterpiece composition, any visible text must be in Chinese, no watermark, no graphic overlay, "
     "must be a real photograph, no illustration, no cartoon, no anime, no 3D render, no CGI"
 )
 
@@ -924,7 +924,7 @@ def build_single_segment_prompt(
             f"The overall aesthetic is {style_bible}. "
             f"Must be a real photograph. No illustration, cartoon, anime, 3D render, or CGI. "
             f"{age_hint}"
-            f"single image, no text in the image, no watermark"
+            f"single image, any visible text must be in Chinese, no watermark"
         )
         print(f"[image:prompt] seg {segment_index} 降级prompt, len={len(prompt)}")
         return prompt
@@ -989,7 +989,7 @@ def build_single_segment_prompt(
         f" The overall aesthetic is {style_bible}. "
         f"Must be a real photograph. No illustration, cartoon, anime, 3D render, or CGI. "
         f"{age_hint}"
-        f"single image, no text in the image, no watermark"
+        f"single image, any visible text must be in Chinese, no watermark"
     )
     print(
         f"[image:prompt] seg {segment_index} v8分镜, "
@@ -1747,7 +1747,7 @@ async def regenerate_single_image(
                 f"{prompt_prefix}, {aspect_hint}. "
                 f"A quiet emotional scene in an everyday Chinese setting, "
                 f"soft natural light, gentle atmosphere. "
-                f"single image, no text, no watermark"
+                f"single image, any visible text must be in Chinese, no watermark"
             ) + actual_style_suffix + " " + SAFETY_SUFFIX
             print(f"[image:single] 降敏重试也失败 → 通用兜底")
             b64 = await _generate_fal(fallback_prompt, width=REQUEST_W, height=REQUEST_H, quality=quality)

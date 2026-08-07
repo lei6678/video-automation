@@ -1,5 +1,39 @@
 # 项目备忘录
 
+## 2026-08-07 生图英文文字修复
+
+### 问题
+
+生成图片中书信、手机屏幕、招牌上的文字全是英文，与中文内容违和。
+
+### 根因
+
+prompt 写的是 `no text in the image`（禁止文字），但 Fal.ai 经常不听话，场景中出现文字对象时默认画英文——模型训练数据以英文为主。
+
+### 修复
+
+策略从"禁止文字"改为"出现文字必是中文"。`image_service.py` 四处替换：
+
+| 位置 | 旧 | 新 |
+|------|-----|-----|
+| `SAFETY_SUFFIX` | `no text` | `any visible text must be in Chinese` |
+| 降级 prompt | `no text in the image` | `any visible text must be in Chinese` |
+| v8 分镜 prompt | `no text in the image` | `any visible text must be in Chinese` |
+| 通用兜底 | `no text` | `any visible text must be in Chinese` |
+
+零失误，纯文本替换，未动任何逻辑结构。
+
+### DeepSeek 连接偶发故障
+
+两次 `APIConnectionError`，排查确认：curl/httpx 直连均正常，无代理干扰，系 DeepSeek 服务端间歇抽风。重试即可。
+
+### 明天计划
+
+- 端到端验证：改写→配音→生图→合成
+- 观察英文文字是否已变为中文
+
+---
+
 ## 2026-08-06 改写对照报告调研 + Bug 修复 + 默认风格切换
 
 ### 一、AI 改写对照报告功能调研 ✅
